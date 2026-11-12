@@ -771,29 +771,36 @@ end
 
 -- The bridge keeps every chat's transcript. After the client wipes our saved data,
 -- it sends them back once, addressed to our new session token.
+-- A chat from a bridge bundle (restore or import), or nil when it is already
+-- here, was deleted here (and the bridge hasn't been told yet), or there's no room.
+local function ChatFromBundle(rc)
+	if type(rc) ~= "table" or not rc.id or FindChat(rc.id) or db.forget[rc.id] or #db.chats >= MAX_CHATS then return nil end
+	local chat = {
+		id = rc.id,
+		name = (rc.name and rc.name ~= "") and rc.name or ("Chat " .. (#db.chats + 1)),
+		cwd = rc.cwd or DEFAULT_CWD,
+		agent = "",
+		history = {},
+		unread = 0,
+		created = time(),
+	}
+	for _, m in ipairs(rc.messages or {}) do
+		local role, agent = m.role, m.agent
+		if role == "claude" then role, agent = "assistant", agent or "claude" end -- an older bridge's transcript
+		if agent == "" then agent = nil end
+		table.insert(chat.history, { role = role, text = m.text, id = m.id, t = m.t, agent = agent })
+	end
+	return chat
+end
+
 local function ImportRestore(r)
 	if type(r) ~= "table" or r.token ~= db.session or db.restored then return end
 	db.restored = true
 	local added = 0
 	local current = ActiveChat()
 	for _, rc in ipairs(r.chats or {}) do
-		-- Skip chats deleted here that the bridge hasn't been told about yet.
-		if type(rc) == "table" and rc.id and not FindChat(rc.id) and not db.forget[rc.id] and #db.chats < MAX_CHATS then
-			local chat = {
-				id = rc.id,
-				name = (rc.name and rc.name ~= "") and rc.name or ("Chat " .. (#db.chats + 1)),
-				cwd = rc.cwd or DEFAULT_CWD,
-				agent = "",
-				history = {},
-				unread = 0,
-				created = time(),
-			}
-			for _, m in ipairs(rc.messages or {}) do
-				local role, agent = m.role, m.agent
-				if role == "claude" then role, agent = "assistant", agent or "claude" end -- an older bridge's transcript
-				if agent == "" then agent = nil end
-				table.insert(chat.history, { role = role, text = m.text, id = m.id, t = m.t, agent = agent })
-			end
+		local chat = ChatFromBundle(rc)
+		if chat then
 			-- Keep the chat we're currently using last so it stays where it was.
 			table.insert(db.chats, math.max(1, #db.chats), chat)
 			added = added + 1
@@ -809,6 +816,37 @@ local function ImportRestore(r)
 		AddHistory(current, "system", "Restored " .. added .. " chat(s) from the bridge after the game reset the saved data.")
 		WoWAI.RenderChatList()
 	end
+end
+
+-- Claude sessions the player asked for with /wow-ai import: each arrives as a
+-- chat the bridge has already bound to its session. A bundle is applied once.
+local function ApplyImport(r)
+	if type(r) ~= "table" or r.token ~= db.session then return end
+	db.imports = db.imports or {}
+	if db.imports[r.id] then return end
+	db.imports[r.id] = time()
+	local names = {}
+	for _, rc in ipairs(r.chats or {}) do
+		local chat = ChatFromBundle(rc)
+		if chat then
+			chat.agent = (type(rc.agent) == "string" and rc.agent) or ""
+			if rc.dev then chat.game = false end
+			table.insert(db.chats, chat)
+			table.insert(names, chat.name)
+		end
+	end
+	local current = ActiveChat()
+	local text
+	if #names > 0 then
+		text = "Imported " .. #names .. " Claude session(s) as chats: " .. table.concat(names, ", ") .. ". Their next message continues the session."
+	else
+		text = "No sessions were imported."
+	end
+	if type(r.note) == "string" and r.note ~= "" then text = text .. "\n" .. r.note end
+	if current then AddHistory(current, "system", text) end
+	print("|cff66ccff[WoW AI]|r " .. text)
+	WoWAI.RenderChatList()
+	WoWAI.Render()
 end
 
 local function TryLoadSlot(why)
@@ -844,6 +882,7 @@ local function TryLoadSlot(why)
 	end
 	local matched = ApplyReplies(type(data) == "table" and data.replies or nil)
 	if type(data) == "table" and data.restore then ImportRestore(data.restore) end
+	if type(data) == "table" and data.import then ApplyImport(data.import) end
 	if type(data) == "table" and data.map and WoWAIMap then WoWAIMap.Sync(data.map) end
 	if why == "signal" and not matched then
 		run.signalUnreliable = true
@@ -889,7 +928,7 @@ local function Tick()
 		-- A hello only needs the bridge to have been seen; it never escalates.
 		-- A forget is the same, but the bridge must have been seen a moment after
 		-- the record went up, so it had a chance to read it.
-		if (rec.hello or rec.forget or rec.open) and not rec.acked and run.bridgeSeen and run.bridgeSeen >= rec.sentAt + ((rec.forget or rec.open) and 2 or 0) then
+		if (rec.hello or rec.forget or rec.open or rec.import) and not rec.acked and run.bridgeSeen and run.bridgeSeen >= rec.sentAt + ((rec.forget or rec.open or rec.import) and 2 or 0) then
 			NoteAcked(rec)
 			changed = true
 		end
@@ -906,8 +945,8 @@ local function Tick()
 				-- Nobody picked it up: show it again.
 				rec.sentAt = now
 				changed = true
-			elseif rec.forget or rec.open then
-				-- The bridge is away; db.forget keeps a forget for the next hello. A link click is dropped.
+			elseif rec.forget or rec.open or rec.import then
+				-- The bridge is away; db.forget keeps a forget for the next hello. A link click or import is dropped.
 				run.outbound[id] = nil
 				changed = true
 			else
@@ -955,6 +994,7 @@ local function ProcessInbox()
 	if type(inbox.agents) == "table" and #inbox.agents > 0 then run.bridgeAgents = inbox.agents end
 	ApplyReplies(inbox.replies)
 	if inbox.restore then ImportRestore(inbox.restore) end
+	if inbox.import then ApplyImport(inbox.import) end
 	if inbox.map and WoWAIMap then WoWAIMap.Sync(inbox.map) end
 end
 
@@ -1367,6 +1407,25 @@ function WoWAI.OpenLink(url)
 	run.outbound[db.lastSeq] = { chat = "", cwd = "", flags = "o", name = "", text = url, sentAt = GetTime(), open = true }
 	RefreshStrip()
 	print("|cff66ccff[WoW AI]|r opening " .. Display(url) .. " in your browser")
+end
+
+-- /wow-ai import [folder filter | session id]: ask the bridge to turn saved Claude
+-- sessions into chats. It answers with an import bundle in the next slots.
+function WoWAI.ImportSessions(filter)
+	local c = ActiveChat()
+	if db.settings.mode ~= "pixel" or not WoWAI.IsConnected() then
+		if c then AddHistory(c, "system", "Import needs the bridge connected in pixel mode.") end
+		WoWAI.Render()
+		return
+	end
+	for _, rec in pairs(run.outbound) do
+		if rec.import and not rec.acked then return end
+	end
+	db.lastSeq = db.lastSeq + 1
+	run.outbound[db.lastSeq] = { chat = "", cwd = "", flags = "i;room=" .. (MAX_CHATS - #db.chats), name = "", text = filter or "", sentAt = GetTime(), import = true }
+	RefreshStrip()
+	if c then AddHistory(c, "system", "Asking the bridge for saved Claude sessions" .. ((filter or "") ~= "" and (" matching \"" .. filter .. "\"") or "") .. "...") end
+	WoWAI.Render()
 end
 
 -- The reply with this id in chat c (assistant entries carry their request's id).
@@ -3045,6 +3104,7 @@ local HELP = table.concat({
 	"/wow-ai chat <n|name>          switch chats (or click one in the left panel)",
 	"/wow-ai rename [name]          rename the current chat (no name = dialog; right-clicking the chat in the left panel offers it too)",
 	"/wow-ai delete                 delete the current chat",
+	"/wow-ai import [folder|id]     open saved Claude Code sessions as chats",
 	"/wow-ai cd <folder>            folder this chat's agent works in (relative to the bridge's folder; no folder = back to default). Right-clicking the chat in the left panel and picking Folder does the same",
 	"/wow-ai agent [name]           which agent this chat talks to (no name = show; default = the bridge's). Right-clicking the chat and picking Agent does the same",
 	"/wow-ai reset                  next message in this chat starts a fresh agent session",
@@ -3094,7 +3154,7 @@ local COMMAND_ARGS = {
 	steps = { [""] = true, on = true, off = true },
 	auto = OnOffOrNumber,
 	echo = function(rest) return rest == "" or rest == "summary" or rest == "full" or rest == "short" or rest == "off" or tonumber(rest) ~= nil end,
-	bind = 1, agent = 1,
+	bind = 1, agent = 1, import = 1,
 	chat = ChatArgument, chats = ChatArgument,
 	cd = true, new = true, rename = true,
 	map = true, -- /wow-ai map ...: Map.lua (layers, navigator, herb/ore nodes)
@@ -3180,6 +3240,9 @@ SlashCmdList["WOWAI"] = function(msg)
 		WoWAI.Toggle(true)
 	elseif cmd == "delete" then
 		WoWAI.DeleteChat()
+	elseif cmd == "import" then
+		WoWAI.ImportSessions(rest)
+		WoWAI.Toggle(true)
 	elseif cmd == "cd" then
 		WoWAI.SetFolder(rest, c)
 		WoWAI.Toggle(true)

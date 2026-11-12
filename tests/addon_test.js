@@ -639,6 +639,37 @@ test('a restore bundle addressed to this session adds the missing chats once', (
   assert.equal(vm.num('#WoWAIDB.chats'), 2);
 });
 
+test('/wow-ai import asks the bridge and adds the imported sessions as chats once', () => {
+  const vm = newVM();
+  login(vm);
+  connect(vm);
+  vm.run('SlashCmdList.WOWAI("import rmbo-core")');
+  const rec = stripRecords(vm).find(r => r.flags.split(';').includes('i'));
+  assert.ok(rec, 'import record on the strip');
+  assert.equal(rec.text, 'rmbo-core');
+  assert.ok(rec.flags.includes('room=15'), rec.flags);
+  // "/ai import pandas for me" is a message, not the command.
+  vm.run('SlashCmdList.WOWAI("import pandas for me")');
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].pendingId ~= nil'), 'true');
+  const token = vm.evaluate('WoWAIDB.session');
+  const chats = `{ { id = "imp1", name = "RMBO24-574", cwd = "/w/core", agent = "claude", dev = true, messages = { { role = "user", id = 0, t = 1, text = "do it" }, { role = "assistant", id = 0, t = 2, agent = "claude", text = "done" } } } }`;
+  const slot = `{ now = time(), cwd = "", replies = {}, import = { token = "${token}", id = ${rec.id}, note = "Skipped 1 already open in a chat.", chats = ${chats} } }`;
+  nextSlot(vm, slot);
+  vm.run('STUB.now = STUB.now + 6; STUB.Tick()');
+  assert.equal(vm.num('#WoWAIDB.chats'), 2);
+  assert.equal(vm.evaluate('WoWAIDB.chats[2].id'), 'imp1');
+  assert.equal(vm.evaluate('WoWAIDB.chats[2].agent'), 'claude');
+  assert.equal(vm.evaluate('WoWAIDB.chats[2].game'), 'false');
+  assert.equal(vm.evaluate('WoWAIDB.chats[2].cwd'), '/w/core');
+  assert.equal(vm.num('#WoWAIDB.chats[2].history'), 2);
+  assert.match(vm.evaluate('WoWAIDB.chats[1].history[#WoWAIDB.chats[1].history].text'), /Imported 1 Claude session.*\n.*already open/s);
+  // The same bundle read again from another slot changes nothing; a deleted import stays deleted.
+  vm.run('WoWAI.SwitchChat("imp1"); WoWAI.DeleteChat()');
+  nextSlot(vm, slot);
+  vm.run('STUB.now = STUB.now + 6; STUB.Tick()');
+  assert.equal(vm.num('#WoWAIDB.chats'), 1);
+});
+
 test('chat management commands: new, chat, rename, delete, clear, copy', () => {
   const vm = newVM();
   login(vm);

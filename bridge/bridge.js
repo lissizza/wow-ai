@@ -30,6 +30,7 @@ const readline = require('readline');
 const { spawn } = require('child_process');
 const P = require('./protocol'); // the pure protocol code, unit-tested in tests/bridge_test.js
 const A = require('./agents');   // how each agent is launched and read, unit-tested in tests/agents_test.js
+const SI = require('./sessions_import'); // /wow-ai import: Claude sessions saved by the editor extension
 
 const HERE = __dirname;
 const CONFIG_FILE = path.join(HERE, 'config.json');
@@ -133,6 +134,7 @@ if (!transcripts.chats) transcripts.chats = {};
 if (!transcripts.tokens) transcripts.tokens = {};
 if (P.pruneStale(state, transcripts)) { saveState(); saveTranscripts(); }
 let pendingRestore = null;
+let pendingImport = null;
 
 function saveTranscripts() {
   try { atomicWrite(TRANSCRIPT_FILE, JSON.stringify(transcripts)); } catch (e) { log('could not save transcripts:', e.message); }
@@ -186,8 +188,38 @@ function forgetChat(job) {
   if (state.sessionCwd) delete state.sessionCwd[sessKey(job)];
   if (state.sessionAgent) delete state.sessionAgent[sessKey(job)];
   if (pendingRestore) pendingRestore.chats = pendingRestore.chats.filter(c => c.id !== job.chat);
+  if (pendingImport) pendingImport.chats = pendingImport.chats.filter(c => c.id !== job.chat);
   saveTranscripts();
   log(`#${job.id}${job.session ? '@' + job.session : ''} forgot chat ${job.chat}${had ? '' : ' (nothing stored)'}`);
+}
+
+// /wow-ai import: turn saved Claude sessions into chats. Each chat is bound to its
+// session (and folder) here, so its first message resumes it; the addon gets the
+// chats with their last few messages in the next publishes.
+function importSessions(job) {
+  const tag = `#${job.id}${job.session ? '@' + job.session : ''}`;
+  const attached = new Set(Object.values(state.sessions));
+  let res;
+  try { res = SI.collect(job.text, { attached, room: job.room || 16 }); }
+  catch (e) { res = { sessions: [], note: 'Import failed: ' + e.message }; }
+  const chats = [];
+  for (const s of res.sessions) {
+    let id;
+    do { id = require('crypto').randomBytes(5).toString('hex'); } while (transcripts.chats[id]);
+    const skey = 'chat:' + id;
+    state.sessions[skey] = s.sessionId;
+    (state.sessionCwd = state.sessionCwd || {})[skey] = s.cwd;
+    (state.sessionAgent = state.sessionAgent || {})[skey] = 'claude';
+    const name = s.title.length > 24 ? s.title.slice(0, 24).replace(/\s+\S*$/, '') || s.title.slice(0, 24) : s.title;
+    const messages = s.messages.map(m => ({ ...m, id: 0 }));
+    transcripts.chats[id] = { id, name, cwd: s.cwd, messages, updated: Date.now() };
+    chats.push({ id, name, cwd: s.cwd, agent: 'claude', dev: true, messages });
+  }
+  saveState();
+  saveTranscripts();
+  pendingImport = { token: job.session, id: job.id, note: res.note, chats };
+  log(`${tag} import ${JSON.stringify(job.text || '')}: ${chats.length} chat(s)${res.note ? '; ' + res.note : ''}`);
+  publishNow();
 }
 
 // Open a URL from a link button in the default browser. Only http(s): the URL
@@ -309,7 +341,7 @@ function takeMapCommands(job, text) {
 // Slot file / Inbox.lua body: see protocol.luaTable.
 function slotFile(globalName, records, urgent = true) {
   const map = Date.now() < mapShareUntil && (urgent || mapLuaSize() <= MAP_PROGRESS_MAX) ? state.map : null;
-  return P.luaTable(globalName, records, { cwd: DEFAULT_CWD, restore: pendingRestore, agent: DEFAULT_AGENT, agents: A.agentIds(), map });
+  return P.luaTable(globalName, records, { cwd: DEFAULT_CWD, restore: pendingRestore, import: pendingImport, agent: DEFAULT_AGENT, agents: A.agentIds(), map });
 }
 
 function addonInstalled() {
@@ -345,6 +377,7 @@ function publishNow(urgent = true) {
   // The restore bundle is large; it rides along once and is then dropped.
   // (The game keeps loading fresh slots until it has read one carrying it.)
   if (pendingRestore) { pendingRestore.published = (pendingRestore.published || 0) + 1; if (pendingRestore.published >= 3) pendingRestore = null; }
+  if (pendingImport) { pendingImport.published = (pendingImport.published || 0) + 1; if (pendingImport.published >= 3) pendingImport = null; }
 }
 
 // Final results publish immediately; progress is throttled. `key` is the chat
@@ -501,6 +534,13 @@ function submit(job) {
     saveState();
     signal('ack', job.id, true);
     openUrl(job);
+    return;
+  }
+  if (job.import) {
+    markHandled(job);
+    saveState();
+    signal('ack', job.id, true);
+    importSessions(job);
     return;
   }
   if (job.hello) {

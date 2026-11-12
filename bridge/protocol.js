@@ -115,12 +115,14 @@ function sameFolder(a, b) {
 // empty one clears the context the bridge keeps), "agent=codex" = run this
 // chat with that agent instead of the bridge's default (see agents.js).
 function parseFlags(flags) {
-  const out = { newSession: false, hello: false, forget: false, open: false, context: false, dev: false, allow: [], agent: '' };
+  const out = { newSession: false, hello: false, forget: false, open: false, import: false, room: 0, context: false, dev: false, allow: [], agent: '' };
   for (const tok of String(flags || '').split(';')) {
     if (tok === 'n') out.newSession = true;
     else if (tok === 'h') out.hello = true;
     else if (tok === 'd') out.forget = true;
     else if (tok === 'o') out.open = true;
+    else if (tok === 'i') out.import = true; // /wow-ai import: text is a folder filter or a session id
+    else if (tok.startsWith('room=')) out.room = Math.max(0, Number(tok.slice(5)) || 0);
     else if (tok === 'c') out.context = true;
     else if (tok === 'dev') out.dev = true; // a development chat: no game context, primer or map/macro hints
     else if (tok.startsWith('allow=')) out.allow.push(...tok.slice(6).split(',').map(s => s.trim()).filter(Boolean));
@@ -356,17 +358,31 @@ function luaTable(globalName, records, opts = {}) {
   }
   lines.push('\t},');
   if (opts.map) lines.push(luaMap(opts.map));
-  const restore = opts.restore;
-  if (restore) {
-    lines.push('\trestore = {', `\t\ttoken = ${luaStr(restore.token)},`, '\t\tchats = {');
-    for (const c of restore.chats) {
-      lines.push('\t\t\t{', `\t\t\t\tid = ${luaStr(c.id)},`, `\t\t\t\tname = ${luaStr(c.name)},`, `\t\t\t\tcwd = ${luaStr(c.cwd)},`, '\t\t\t\tmessages = {');
+  const bundleChats = (chats, extra) => {
+    lines.push('\t\tchats = {');
+    for (const c of chats) {
+      lines.push('\t\t\t{', `\t\t\t\tid = ${luaStr(c.id)},`, `\t\t\t\tname = ${luaStr(c.name)},`, `\t\t\t\tcwd = ${luaStr(c.cwd)},`);
+      if (extra) lines.push(`\t\t\t\tagent = ${luaStr(c.agent || '')},`, `\t\t\t\tdev = ${c.dev ? 'true' : 'false'},`);
+      lines.push('\t\t\t\tmessages = {');
       for (const m of c.messages) {
         lines.push(`\t\t\t\t\t{ role = ${luaStr(m.role)}, id = ${Number(m.id) || 0}, t = ${Number(m.t) || 0}, agent = ${luaStr(m.agent || '')}, text = ${luaStr(m.text)} },`);
       }
       lines.push('\t\t\t\t},', '\t\t\t},');
     }
-    lines.push('\t\t},', '\t},');
+    lines.push('\t\t},');
+  };
+  const restore = opts.restore;
+  if (restore) {
+    lines.push('\trestore = {', `\t\ttoken = ${luaStr(restore.token)},`);
+    bundleChats(restore.chats, false);
+    lines.push('\t},');
+  }
+  // Sessions the player asked to import (/wow-ai import), for that addon session only.
+  const imp = opts.import;
+  if (imp) {
+    lines.push('\timport = {', `\t\ttoken = ${luaStr(imp.token)},`, `\t\tid = ${Number(imp.id) || 0},`, `\t\tnote = ${luaStr(imp.note || '')},`);
+    bundleChats(imp.chats, true);
+    lines.push('\t},');
   }
   lines.push('}', '');
   return lines.join('\n');
