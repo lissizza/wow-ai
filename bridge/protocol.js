@@ -377,6 +377,15 @@ function luaTable(globalName, records, opts = {}) {
     bundleChats(restore.chats, false);
     lines.push('\t},');
   }
+  // Messages typed into chats' sessions outside the bridge (session sync).
+  const sync = opts.sync;
+  if (sync && Array.isArray(sync.messages) && sync.messages.length) {
+    lines.push('\tsync = {', `\t\tepoch = ${luaStr(sync.epoch || '')},`, '\t\tmessages = {');
+    for (const m of sync.messages) {
+      lines.push(`\t\t\t{ seq = ${Number(m.seq) || 0}, chat = ${luaStr(m.chat)}, role = ${luaStr(m.role)}, t = ${Number(m.t) || 0}, agent = ${luaStr(m.agent || '')}, text = ${luaStr(m.text)} },`);
+    }
+    lines.push('\t\t},', '\t},');
+  }
   // Sessions the player asked to import (/wow-ai import), for that addon session only.
   const imp = opts.import;
   if (imp) {

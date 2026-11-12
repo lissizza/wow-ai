@@ -87,3 +87,27 @@ test('the import flags and bundle travel through the strip and the slot file', (
   assert.match(lua, /dev = true,/);
   assert.match(lua, /note = "Skipped \\"x\\"\.",/);
 });
+
+test('readNewMessages reads whole new lines, skips the bridge\'s own runs and resumes from the offset', () => {
+  const file = path.join(TMP, 'tr_new.jsonl');
+  transcript(file, [user('old')]);
+  const start = fs.statSync(file).size;
+  fs.appendFileSync(file, [
+    JSON.stringify({ ...user('from game'), entrypoint: 'sdk-cli' }),
+    JSON.stringify({ ...said('game answer'), entrypoint: 'sdk-cli' }),
+    JSON.stringify({ ...user('from terminal'), entrypoint: 'cli' }),
+    JSON.stringify({ ...said('one'), entrypoint: 'cli' }),
+    JSON.stringify({ ...said('two'), entrypoint: 'cli' }),
+  ].join('\n') + '\n' + '{"type":"user","partial');
+  const r = SI.readNewMessages(file, start);
+  assert.deepEqual(r.messages.map(m => [m.role, m.text, m.agent]), [['user', 'from terminal', ''], ['assistant', 'one\n\ntwo', 'claude']]);
+  assert.equal(r.offset, fs.statSync(file).size - '{"type":"user","partial'.length);
+  assert.deepEqual(SI.readNewMessages(file, r.offset).messages, []);
+});
+
+test('the sync buffer rides in the slot file', () => {
+  const lua = P.luaTable('WoWAI_SlotData', [], { sync: { epoch: 'e1', messages: [{ seq: 4, chat: 'abc', role: 'assistant', t: 9, agent: 'claude', text: 'hi "x"' }] } });
+  assert.match(lua, /sync = \{\n\t\tepoch = "e1",/);
+  assert.match(lua, /\{ seq = 4, chat = "abc", role = "assistant", t = 9, agent = "claude", text = "hi \\"x\\"" \}/);
+  assert.doesNotMatch(P.luaTable('X', [], { sync: { epoch: 'e1', messages: [] } }), /sync =/);
+});

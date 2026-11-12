@@ -189,6 +189,7 @@ function forgetChat(job) {
   if (state.sessionAgent) delete state.sessionAgent[sessKey(job)];
   if (pendingRestore) pendingRestore.chats = pendingRestore.chats.filter(c => c.id !== job.chat);
   if (pendingImport) pendingImport.chats = pendingImport.chats.filter(c => c.id !== job.chat);
+  state.syncBuffer = state.syncBuffer.filter(m => m.chat !== job.chat);
   saveTranscripts();
   log(`#${job.id}${job.session ? '@' + job.session : ''} forgot chat ${job.chat}${had ? '' : ' (nothing stored)'}`);
 }
@@ -341,7 +342,7 @@ function takeMapCommands(job, text) {
 // Slot file / Inbox.lua body: see protocol.luaTable.
 function slotFile(globalName, records, urgent = true) {
   const map = Date.now() < mapShareUntil && (urgent || mapLuaSize() <= MAP_PROGRESS_MAX) ? state.map : null;
-  return P.luaTable(globalName, records, { cwd: DEFAULT_CWD, restore: pendingRestore, import: pendingImport, agent: DEFAULT_AGENT, agents: A.agentIds(), map });
+  return P.luaTable(globalName, records, { cwd: DEFAULT_CWD, restore: pendingRestore, import: pendingImport, sync: { epoch: state.syncEpoch, messages: recentSync() }, agent: DEFAULT_AGENT, agents: A.agentIds(), map });
 }
 
 function addonInstalled() {
@@ -818,6 +819,92 @@ function finish(job, status, text, session, denied) {
 }
 
 // ---------------------------------------------------------------------------
+// Session sync: messages typed into a chat's Claude session somewhere else (a
+// terminal in the editor) show up in that chat in game.
+// ---------------------------------------------------------------------------
+//
+// Every chat bound to a Claude session has its transcript watched. New lines not
+// written by our own runs (entrypoint sdk-cli) are read once the file has been
+// quiet for a few seconds, added to the chat's bridge transcript and to a short
+// numbered buffer that rides along in every slot file; sync/NNNN.wav flips like
+// presence so the game spends a slot only when there is something to read.
+const SYNC_MAX = cfg.syncMax || 500;
+const SYNC_QUIET_MS = 8000, SYNC_MAX_WAIT_MS = 60000, SYNC_BUFFER = 60;
+const syncWatch = new Map(); // sessionId -> { file, offset, grewAt, missUntil }
+if (!state.syncEpoch) state.syncEpoch = require('crypto').randomBytes(4).toString('hex');
+if (!Array.isArray(state.syncBuffer)) state.syncBuffer = [];
+
+// What rides in slot files: the game reads a slot within seconds of the flip, so
+// only the last few minutes' messages need to be there (every publish writes all slots).
+const SYNC_KEEP_MS = 15 * 60000;
+function recentSync(now = Date.now()) {
+  return state.syncBuffer.filter(m => now - (m.addedAt || 0) < SYNC_KEEP_MS);
+}
+
+function syncFile(k) {
+  return path.join(cfg.addonDir, 'WoWAI', 'sync', String(k).padStart(4, '0') + '.wav');
+}
+function syncFlip() {
+  if (!fs.existsSync(path.join(cfg.addonDir, 'WoWAI', 'sync'))) return;
+  state.syncSig = ((state.syncSig || 0) % SYNC_MAX) + 1;
+  const k = state.syncSig;
+  try { atomicWrite(syncFile(k), SILENT_WAV); } catch {}
+  for (let j = 1; j <= 50; j++) {
+    try { atomicWrite(syncFile(((k - 1 + j) % SYNC_MAX) + 1), Buffer.alloc(0)); } catch {}
+  }
+}
+
+// Start watching a session from its current end (what came before is already in
+// the chat: an import carries it, a game chat wrote it).
+function watchSession(sessionId, now = Date.now()) {
+  let w = syncWatch.get(sessionId);
+  if (w && w.file) return w;
+  if (w && w.missUntil > now) return null;
+  const file = SI.findTranscript(sessionId);
+  if (!file) { syncWatch.set(sessionId, { missUntil: now + 60000 }); return null; }
+  let size = 0;
+  try { size = fs.statSync(file).size; } catch {}
+  w = { file, offset: size, grewAt: 0 };
+  syncWatch.set(sessionId, w);
+  return w;
+}
+
+function syncTick() {
+  if (cfg.sessionSync === false) return;
+  const now = Date.now();
+  let added = 0;
+  for (const [skey, sessionId] of Object.entries(state.sessions)) {
+    if (!skey.startsWith('chat:') || !sessionId) continue;
+    const chat = skey.slice(5);
+    const w = watchSession(sessionId, now);
+    if (!w) continue;
+    let st;
+    try { st = fs.statSync(w.file); } catch { continue; }
+    if (st.size <= w.offset) { w.grewAt = 0; if (st.size < w.offset) w.offset = st.size; continue; }
+    if (!w.grewAt) w.grewAt = now;
+    if (now - st.mtimeMs < SYNC_QUIET_MS && now - w.grewAt < SYNC_MAX_WAIT_MS) continue;
+    const { offset, messages } = SI.readNewMessages(w.file, w.offset);
+    w.offset = offset;
+    w.grewAt = 0;
+    if (!messages.length || forgotten.has(chat)) continue;
+    const tc = transcripts.chats[chat];
+    for (const m of messages) {
+      state.syncSeq = (state.syncSeq || 0) + 1;
+      state.syncBuffer.push({ seq: state.syncSeq, chat, addedAt: now, ...m });
+      if (tc) { tc.messages.push({ ...m, id: 0 }); while (tc.messages.length > 200) tc.messages.shift(); tc.updated = now; }
+      added++;
+    }
+    log(`sync: ${messages.length} new message(s) in chat ${chat} (session ${sessionId.slice(0, 8)}) from outside the bridge`);
+  }
+  if (!added) return;
+  while (state.syncBuffer.length > SYNC_BUFFER) state.syncBuffer.shift();
+  saveState();
+  saveTranscripts();
+  publishNow();
+  syncFlip();
+}
+
+// ---------------------------------------------------------------------------
 // Input loops
 // ---------------------------------------------------------------------------
 
@@ -919,6 +1006,8 @@ if (inject !== null) {
     setInterval(pollSavedVariables, cfg.pollMs || 750);
     presenceBeat();
     setInterval(presenceBeat, cfg.presenceIntervalMs || 30000);
+    syncTick();
+    setInterval(syncTick, cfg.syncPollMs || 4000);
     if (cap.enabled) startCapture();
   }
 }

@@ -30,6 +30,7 @@ local SLOT_PREFIX = "WoWAI_S"
 local ACT_MAX = 60 -- heartbeat files per message (act/NNN/01..60.wav)
 local STEP_MAX = 30 -- finished-step files per message (step/NNN/01..30.wav)
 local PRESENCE_MAX = 2000 -- presence/0001..2000.wav, one flipped by the bridge every 30 s
+local SYNC_MAX = 500 -- sync/0001..0500.wav, one flipped when a chat's session got messages from outside the game
 local STRIP_TRIES = 3 -- re-show an unacknowledged message this many times before falling back
 local CELL, CELLS_PER_ROW, MAX_ROWS = 4, 200, 48
 local STRIP_SECONDS = 40 -- max per message; it leaves the strip as soon as the bridge acknowledges
@@ -517,14 +518,18 @@ local function PresencePath(k)
 	return string.format("Interface\\AddOns\\WoWAI\\presence\\%04d.wav", k)
 end
 
--- Valid presence files form a prefix 1..k, so a binary search finds the head.
-local function FindPresenceHead()
-	local lo, hi = 0, PRESENCE_MAX
+-- Valid presence (or sync) files form a prefix 1..k, so a binary search finds the head.
+local function FindHead(pathOf, max)
+	local lo, hi = 0, max
 	while lo < hi do
 		local mid = math.ceil((lo + hi) / 2)
-		if SoundValid(PresencePath(mid)) then lo = mid else hi = mid - 1 end
+		if SoundValid(pathOf(mid)) then lo = mid else hi = mid - 1 end
 	end
 	return lo
+end
+
+local function FindPresenceHead()
+	return FindHead(PresencePath, PRESENCE_MAX)
 end
 
 local function PollPresence()
@@ -849,6 +854,43 @@ local function ApplyImport(r)
 	WoWAI.Render()
 end
 
+-- Session sync: messages typed into a chat's Claude session outside the game (a
+-- terminal in the editor), numbered by the bridge. Each is added once; messages
+-- for chats we don't have only move the counter (a restore brings them anyway).
+local function ApplySync(s)
+	if type(s) ~= "table" or type(s.messages) ~= "table" then return end
+	if s.epoch ~= db.syncEpoch then
+		db.syncEpoch = s.epoch
+		db.syncSeq = 0
+	end
+	local counts, order = {}, {}
+	for _, m in ipairs(s.messages) do
+		local seq = type(m) == "table" and tonumber(m.seq) or 0
+		if seq > (db.syncSeq or 0) then
+			db.syncSeq = seq
+			local c = FindChat(m.chat)
+			if c and type(m.text) == "string" and (m.role == "user" or m.role == "assistant") then
+				local agent = m.role == "assistant" and ((m.agent and m.agent ~= "") and m.agent or "claude") or nil
+				AddHistory(c, m.role, m.text, nil, nil, agent)
+				local h = c.history[#c.history]
+				h.synced = true
+				if tonumber(m.t) and m.t > 0 then h.t = m.t end
+				if not counts[c] then counts[c] = 0; table.insert(order, c) end
+				counts[c] = counts[c] + 1
+			end
+		end
+	end
+	for _, c in ipairs(order) do
+		local visible = ui.frame and ui.frame:IsShown() and db.activeChat == c.id
+		if not visible then c.unread = (c.unread or 0) + counts[c] end
+		print("|cff66ccff[WoW AI]|r " .. c.name .. ": " .. counts[c] .. " new message(s) from outside the game")
+	end
+	if #order > 0 then
+		WoWAI.RenderChatList()
+		WoWAI.Render()
+	end
+end
+
 local function TryLoadSlot(why)
 	local name = FreeSlot()
 	if not name then
@@ -881,6 +923,7 @@ local function TryLoadSlot(why)
 		if type(data.agents) == "table" and #data.agents > 0 then run.bridgeAgents = data.agents end
 	end
 	local matched = ApplyReplies(type(data) == "table" and data.replies or nil)
+	if type(data) == "table" and data.sync then ApplySync(data.sync) end
 	if type(data) == "table" and data.restore then ImportRestore(data.restore) end
 	if type(data) == "table" and data.import then ApplyImport(data.import) end
 	if type(data) == "table" and data.map and WoWAIMap then WoWAIMap.Sync(data.map) end
@@ -890,10 +933,35 @@ local function TryLoadSlot(why)
 	WoWAI.Render()
 end
 
+-- The bridge flips the next sync file when chats got messages from outside the
+-- game; one slot read brings them (several flips in a row cost one read).
+local function SyncPath(k)
+	return string.format("Interface\\AddOns\\WoWAI\\sync\\%04d.wav", k)
+end
+
+local function PollSync()
+	if not signalAvailable or not db.settings.signal or db.settings.mode ~= "pixel" then return end
+	if not run.sync then
+		run.sync = { last = FindHead(SyncPath, SYNC_MAX) }
+		return
+	end
+	local k = (run.sync.last % SYNC_MAX) + 1
+	if not SoundValid(SyncPath(k)) then return end
+	run.sync.last = k
+	for _ = 1, 10 do
+		local n = (run.sync.last % SYNC_MAX) + 1
+		if not SoundValid(SyncPath(n)) then break end
+		run.sync.last = n
+	end
+	run.sync.reads = (run.sync.reads or 0) + 1
+	TryLoadSlot("sync")
+end
+
 local function Tick()
 	if not db then return end
 	local now = GetTime()
 	PollPresence()
+	PollSync()
 	-- Without presence beats, the only evidence is a slot read; spend one every
 	-- IDLE_POLL_SECONDS while idle so the light still reflects reality (and stays
 	-- green while the bridge is up: BridgeState allows for this interval).
@@ -993,6 +1061,7 @@ local function ProcessInbox()
 	if type(inbox.agent) == "string" and inbox.agent ~= "" then run.bridgeAgent = inbox.agent end
 	if type(inbox.agents) == "table" and #inbox.agents > 0 then run.bridgeAgents = inbox.agents end
 	ApplyReplies(inbox.replies)
+	if inbox.sync then ApplySync(inbox.sync) end
 	if inbox.restore then ImportRestore(inbox.restore) end
 	if inbox.import then ApplyImport(inbox.import) end
 	if inbox.map and WoWAIMap then WoWAIMap.Sync(inbox.map) end
@@ -3377,6 +3446,7 @@ SlashCmdList["WOWAI"] = function(msg)
 			"sound checks: " .. signalStats.checks .. ", valid hits: " .. signalStats.hits .. (signalStats.lastHit and (", last hit " .. FmtDur(GetTime() - signalStats.lastHit) .. " ago") or ""),
 			"slot polls this session: " .. (run.polls or 0) .. ", free slots: " .. free .. "/" .. SLOT_COUNT,
 			"presence: head at " .. tostring(run.presence and run.presence.last or "?") .. ", beats seen: " .. tostring(run.presence and run.presence.beats or 0),
+			"sync: head at " .. tostring(run.sync and run.sync.last or "?") .. ", reads: " .. tostring(run.sync and run.sync.reads or 0) .. ", last message " .. tostring(db.syncSeq or 0),
 			select(5, WoWAI.BridgeState()),
 			"mode: " .. s.mode .. ", session token: " .. tostring(db.session),
 		}

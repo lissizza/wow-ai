@@ -670,6 +670,33 @@ test('/wow-ai import asks the bridge and adds the imported sessions as chats onc
   assert.equal(vm.num('#WoWAIDB.chats'), 1);
 });
 
+test('session sync: a sync flip brings messages typed outside the game into their chat once', () => {
+  const vm = newVM();
+  vm.run('STUB.sounds["Interface\\\\AddOns\\\\WoWAI\\\\ctl\\\\valid.wav"] = true');
+  login(vm);
+  connect(vm);
+  vm.run('SlashCmdList.WOWAI("new Work")');
+  const work = vm.evaluate('WoWAIDB.chats[2].id');
+  vm.run('SlashCmdList.WOWAI("chat 1")');
+  vm.run('STUB.Tick()'); // finds the sync head (nothing flipped yet)
+  const sync = seq => `sync = { epoch = "e1", messages = { { seq = 1, chat = "${work}", role = "user", t = 5, agent = "", text = "from terminal" }, { seq = ${seq}, chat = "${work}", role = "assistant", t = 6, agent = "claude", text = "answer" }, { seq = 3, chat = "gone", role = "user", t = 7, agent = "", text = "x" } } }`;
+  nextSlot(vm, `{ now = time(), cwd = "", replies = {}, ${sync(2)} }`);
+  vm.run('STUB.sounds["Interface\\\\AddOns\\\\WoWAI\\\\sync\\\\0001.wav"] = true; STUB.Tick()');
+  assert.equal(vm.num('#WoWAIDB.chats[2].history'), 2);
+  assert.equal(vm.evaluate('WoWAIDB.chats[2].history[2].text'), 'answer');
+  assert.equal(vm.evaluate('WoWAIDB.chats[2].history[2].agent'), 'claude');
+  assert.equal(vm.num('WoWAIDB.chats[2].unread'), 2);
+  assert.equal(vm.num('WoWAIDB.syncSeq'), 3);
+  // The same buffer in a later slot adds nothing.
+  nextSlot(vm, `{ now = time(), cwd = "", replies = {}, ${sync(2)} }`);
+  vm.run('STUB.sounds["Interface\\\\AddOns\\\\WoWAI\\\\sync\\\\0002.wav"] = true; STUB.Tick()');
+  assert.equal(vm.num('#WoWAIDB.chats[2].history'), 2);
+  // A bridge with a new epoch starts its numbering over.
+  nextSlot(vm, `{ now = time(), cwd = "", replies = {}, sync = { epoch = "e2", messages = { { seq = 1, chat = "${work}", role = "user", t = 8, agent = "", text = "after restart" } } } }`);
+  vm.run('STUB.sounds["Interface\\\\AddOns\\\\WoWAI\\\\sync\\\\0003.wav"] = true; STUB.Tick()');
+  assert.equal(vm.evaluate('WoWAIDB.chats[2].history[3].text'), 'after restart');
+});
+
 test('chat management commands: new, chat, rename, delete, clear, copy', () => {
   const vm = newVM();
   login(vm);

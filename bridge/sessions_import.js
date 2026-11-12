@@ -132,6 +132,39 @@ function readTranscript(file, { limit = MESSAGES, chars = MESSAGE_CHARS } = {}) 
   return { title: custom || ai, cwd, messages: tail };
 }
 
+// Messages appended to a transcript since byte `offset`, typed or answered
+// outside the bridge (another terminal, the editor): the bridge's own runs are
+// marked entrypoint "sdk-cli" and skipped, since the game already has them. Only
+// whole lines are read; the returned offset stops before a line still being written.
+function readNewMessages(file, offset, { chars = MESSAGE_CHARS } = {}) {
+  let size;
+  try { size = fs.statSync(file).size; } catch { return { offset, messages: [] }; }
+  if (size < offset) offset = 0; // rewritten
+  if (size === offset) return { offset, messages: [] };
+  const buf = Buffer.alloc(size - offset);
+  const fd = fs.openSync(file, 'r');
+  try { fs.readSync(fd, buf, 0, buf.length, offset); } finally { fs.closeSync(fd); }
+  const end = buf.lastIndexOf(0x0a);
+  if (end < 0) return { offset, messages: [] };
+  const messages = [];
+  for (const line of buf.subarray(0, end).toString('utf8').split('\n')) {
+    if (!line) continue;
+    let e;
+    try { e = JSON.parse(line); } catch { continue; }
+    if (e.entrypoint === 'sdk-cli') continue;
+    const role = e.type === 'user' ? 'user' : e.type === 'assistant' ? 'assistant' : '';
+    if (!role) continue;
+    const text = role === 'user' ? userText(e) : assistantText(e);
+    if (!text) continue;
+    const t = Math.floor((Date.parse(e.timestamp) || Date.now()) / 1000);
+    const last = messages[messages.length - 1];
+    if (last && last.role === 'assistant' && role === 'assistant') { last.text += '\n\n' + text; last.t = t; }
+    else messages.push({ role, text, t, agent: role === 'assistant' ? 'claude' : '' });
+  }
+  for (const m of messages) if (m.text.length > chars) m.text = m.text.slice(0, chars - 1) + '…';
+  return { offset: offset + end + 1, messages };
+}
+
 // Sessions to import for `filter`:
 //   - a session id: just that one;
 //   - otherwise every session in snapshots saved within maxAgeMs, newest snapshot
@@ -178,4 +211,4 @@ function collect(filter, { attached = new Set(), now = Date.now(), maxAgeMs = MA
   return { sessions, note: notes.length ? 'Skipped ' + notes.join(', ') + '.' : '' };
 }
 
-module.exports = { collect, readSnapshots, readTranscript, findTranscript, editorStorageDirs, UUID_RE };
+module.exports = { collect, readSnapshots, readTranscript, readNewMessages, findTranscript, editorStorageDirs, UUID_RE };

@@ -59,6 +59,12 @@ for (let k = 1; k <= PRESENCE; k++) {
   ensure(path.join(addons, 'WoWAI', 'presence', String(k).padStart(4, '0') + '.wav'), '');
 }
 
+// Sync files: the bridge flips the next one when a chat's session got messages
+// from outside the game (a terminal), so the game reads a slot only then.
+for (let k = 1; k <= (cfg.syncMax || 500); k++) {
+  ensure(path.join(addons, 'WoWAI', 'sync', String(k).padStart(4, '0') + '.wav'), '');
+}
+
 // Control files for the addon's self-test: one always empty, one always valid.
 ensure(path.join(addons, 'WoWAI', 'ctl', 'empty.wav'), '');
 ensure(path.join(addons, 'WoWAI', 'ctl', 'valid.wav'), require('./protocol').SILENT_WAV);

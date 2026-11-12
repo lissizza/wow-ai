@@ -74,6 +74,9 @@ These sizes are baked into the files `install-slots.js` creates, and the addon h
 | `stepMax` | `30` | Step files per message (`step/NNN/01..30.wav`). One flips per plan item the agent finishes; the addon then reads the step's text from a slot and prints it in the game chat. |
 | `jiraUrl` | `""` | Your Jira address, e.g. `https://example.atlassian.net`. Issue keys like `ABC-123` in replies then become link buttons to `<jiraUrl>/browse/ABC-123`. URLs in replies are buttons either way. |
 | `presenceMax` | `2000` | Presence files (`presence/0001..2000.wav`). One flips per `presenceIntervalMs`. |
+| `sessionSync` | `true` | Watch the Claude session of every chat and bring messages typed into it outside the game (a terminal in the editor) into that chat. `false` turns it off. |
+| `syncPollMs` | `4000` | How often the bridge checks the chats' session files. A file is read once it has been quiet for 8 s (at most 60 s after it started growing). |
+| `syncMax` | `500` | Sync files (`sync/0001..0500.wav`). One flips when chats got such messages; the addon then reads one slot. |
 | `presenceIntervalMs` | `30000` | How often the bridge flips a presence file so the in-game light stays green. |
 | `tocInterface` | `"16001"` | `## Interface:` version written into every slot addon's `.toc`. Bump it when the client's TOC version changes. |
 
