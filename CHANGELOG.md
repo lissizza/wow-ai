@@ -4,6 +4,10 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ## [Unreleased]
 
+### Changed
+
+- Messages typed while a chat waits for a reply are queued instead of kept as a single hidden draft (each one used to replace the previous, and nothing showed on screen). They appear under the running reply marked "queued", go out together as one message when the reply arrives, and `/wow-ai cancel` puts them back in the input box.
+
 ### Added
 
 - Development chats. A chat is now either a **game chat** (the character/zone context, the addon/macro primer and the map/macro hints go into the agent's system prompt, as before) or a **development chat** (none of that: only the reply-format rule, a few thousand tokens less per run). New chats are development chats; `/wow-ai game on|off` switches the current chat, `/wow-ai game default on|off` sets what chats that never picked use. Game chats are marked `game` in the chat list. The strip record carries a `dev` flag (and the reload outbox `dev = true`); the bridge skips the context for such a run and logs `[dev]`.

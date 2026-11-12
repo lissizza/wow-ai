@@ -933,3 +933,42 @@ test('without the bridge a link opens in the copy box instead', () => {
   assert.equal(stripRecords(vm).filter(r => r.flags === 'o').length, 0);
   assert.match(vm.evaluate('table.concat(STUB.prints, "\\n")'), /copy box/);
 });
+
+test('messages typed while a chat waits are queued, shown, and sent together after the reply', () => {
+  const vm = newVM();
+  login(vm);
+  connect(vm);
+  vm.run('WoWAI.Send("first")');
+  const chatId = vm.evaluate('WoWAIDB.chats[1].id');
+  const id = vm.num('WoWAIDB.chats[1].pendingId');
+  vm.run('WoWAI.Send("second")');
+  vm.run('WoWAI.Send("third")');
+  vm.run('WoWAI.Send("")');
+  assert.equal(vm.num('WoWAIDB.chats[1].pendingId'), id, 'still waiting on the first');
+  assert.equal(vm.num('#WoWAIDB.chats[1].queued'), 2, 'both kept, in order');
+  vm.run('WoWAI.Render()');
+  const shown = vm.evaluate('table.concat(STUB.texts, "|")');
+  assert.ok(shown.includes('second') && shown.includes('third'), 'queued messages are on screen');
+  nextSlot(vm, `{ now = time(), cwd = "", replies = { { chat = "${chatId}", id = ${id}, status = "done", text = "done first" } } }`);
+  vm.run('WoWAI.Send("")'); // the refresh hotkey checks for the reply
+  const id2 = vm.num('WoWAIDB.chats[1].pendingId');
+  assert.ok(id2 > id, 'the queue went out after the reply');
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].queued'), null);
+  const rec = stripRecords(vm).find(r => r.id === id2);
+  assert.equal(rec.text, 'second\n\nthird');
+  const h = 'WoWAIDB.chats[1].history';
+  assert.equal(vm.evaluate(`${h}[#${h}].text`), 'second\n\nthird');
+  assert.equal(vm.evaluate(`${h}[#${h} - 1].text`), 'done first');
+});
+
+test('cancel puts queued messages back in the box', () => {
+  const vm = newVM();
+  login(vm);
+  connect(vm);
+  vm.run('WoWAI.Send("first")');
+  vm.run('WoWAI.Send("later one")');
+  vm.run('SlashCmdList.WOWAI("cancel")');
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].pendingId'), null);
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].queued'), null);
+  assert.equal(vm.evaluate('WoWAIInput:GetText()'), 'later one');
+});

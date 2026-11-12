@@ -1087,6 +1087,17 @@ Finish = function(chat, role, text, denied, agent, summary, macros, links, choic
 	end
 	WoWAI.Render()
 	WoWAI.Notify(chat, text, agent, summary)
+	-- Messages typed while this one ran go out now, together.
+	if chat.queued and #chat.queued > 0 then
+		local q = table.concat(chat.queued, "\n\n")
+		chat.queued = nil
+		if WoWAI.IsConnected() then
+			WoWAI.Send(q, nil, chat)
+		else
+			chat.draft = q
+			WoWAI.Render()
+		end
+	end
 end
 
 ---------------------------------------------------------------------------
@@ -1353,13 +1364,20 @@ end
 ---------------------------------------------------------------------------
 
 -- allow: optional list of permission rules to grant before this message runs.
-function WoWAI.Send(text, allow)
-	local c = ActiveChat()
+-- chat: the chat to send in (default: the active one).
+function WoWAI.Send(text, allow, chat)
+	local c = chat or ActiveChat()
 	if not c then return end
 	text = Trim(text or "")
 	if c.pendingId then
-		-- Typing while waiting: keep the draft, and check for the reply.
-		if text ~= "" then c.draft = text end
+		-- Typing while waiting: the message joins the chat's queue, shown under the
+		-- running reply, and goes out (all queued ones as one message) when the reply
+		-- arrives. Either way, check for the reply.
+		if text ~= "" then
+			c.queued = c.queued or {}
+			table.insert(c.queued, text)
+			WoWAI.Render()
+		end
 		if db.settings.mode == "pixel" and not (run.slotsExhausted or run.slotsMissing) then
 			TryLoadSlot("manual")
 		else
@@ -1850,7 +1868,7 @@ function WoWAI.DeleteChat(id)
 	ForgetOnBridge(c)
 	if #db.chats == 1 then
 		wipe(c.history)
-		c.pendingId, c.progress, c.unread, c.draft = nil, nil, 0, nil
+		c.pendingId, c.progress, c.unread, c.draft, c.queued = nil, nil, 0, nil, nil
 		c.name = "Chat 1"
 		WoWAI.Render()
 		WoWAI.RenderChatList()
@@ -2293,6 +2311,9 @@ function WoWAI.Render()
 			local head = "working... " .. ActivityLine(c)
 			if run.statusText and run.statusText ~= "" then head = head .. "\n" .. run.statusText end
 			Place("assistant", (p and p ~= "") and (head .. "\n\n" .. p) or head, "", true, nil, ChatAgent(c))
+			for _, q in ipairs(c.queued or {}) do
+				Place("user", q, "queued: goes out after this reply", true)
+			end
 		elseif #c.history == 0 then
 			if run.restoring then
 				Place("system", "Connecting to the bridge and restoring your chats...", "", true)
@@ -3462,6 +3483,11 @@ SlashCmdList["WOWAI"] = function(msg)
 	elseif cmd == "cancel" then
 		if c.pendingId then
 			AddHistory(c, "system", "Gave up waiting on #" .. c.pendingId)
+			if c.queued and #c.queued > 0 then
+				-- Nothing to wait for any more: the queued messages go back in the box.
+				if ui.input then ui.input:SetText(table.concat(c.queued, "\n\n")) end
+				c.queued = nil
+			end
 			run.outbound[c.pendingId] = nil
 			if run.act then run.act[c.id] = nil end
 			c.pendingId = nil
