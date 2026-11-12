@@ -110,16 +110,17 @@ function sameFolder(a, b) {
 
 // Flags field: ';'-separated tokens. "n" = fresh agent session, "h" = hello
 // (no prompt), "d" = the player deleted this chat: forget its transcript and
-// session (no prompt), "allow=Rule1,Rule2" = add these permission rules before
+// session (no prompt), "o" = open the URL in the text in the browser (no prompt), "allow=Rule1,Rule2" = add these permission rules before
 // running, "c" = the record carries a game-context field before the text (an
 // empty one clears the context the bridge keeps), "agent=codex" = run this
 // chat with that agent instead of the bridge's default (see agents.js).
 function parseFlags(flags) {
-  const out = { newSession: false, hello: false, forget: false, context: false, dev: false, allow: [], agent: '' };
+  const out = { newSession: false, hello: false, forget: false, open: false, context: false, dev: false, allow: [], agent: '' };
   for (const tok of String(flags || '').split(';')) {
     if (tok === 'n') out.newSession = true;
     else if (tok === 'h') out.hello = true;
     else if (tok === 'd') out.forget = true;
+    else if (tok === 'o') out.open = true;
     else if (tok === 'c') out.context = true;
     else if (tok === 'dev') out.dev = true; // a development chat: no game context, primer or map/macro hints
     else if (tok.startsWith('allow=')) out.allow.push(...tok.slice(6).split(',').map(s => s.trim()).filter(Boolean));
@@ -196,6 +197,15 @@ const REPLY_FORMAT = [
   'The user is talking to you from inside World of Warcraft through the wow-ai addon. They type in a small in-game window and your reply is shown there as plain text (markdown is not rendered), so keep replies compact and formatting simple.',
   '',
   `Only a short summary of each reply is printed into the game chat, where the user actually sees it while playing; the full reply is only visible if they open the addon window. So end EVERY reply with a final block that starts with "${SUMMARY_MARKER}" on its own line and holds one or two short lines (under about 200 characters in total) saying what you did or what the answer is, and what you need from the user if anything. Write it as plain text. Do not repeat the summary elsewhere, and put nothing after it.`,
+  '',
+  'Every http(s) URL in your reply becomes a button that opens it in the browser on the user\'s computer, so give the full URL of a pull request, issue, page or build you refer to.',
+  '',
+  'When you need the user to pick between options or confirm something, put a fenced block whose language tag is choices right before the summary block, with one option per line (at most 5, each under 60 characters), worded as the message the user would send back, e.g.:',
+  '```choices',
+  'Yes, commit and push',
+  'No, show me the diff first',
+  '```',
+  'The addon shows each line as a button that sends it. Still ask the question in the reply itself.',
 ];
 
 // How the agent draws on the world map (see "Map layers" below and docs/MAP.md).
@@ -333,6 +343,12 @@ function luaTable(globalName, records, opts = {}) {
       lines.push(`\t\t\tdenied = { ${r.denied.map(luaStr).join(', ')} },`);
     }
     if (Array.isArray(r.macros) && r.macros.length) lines.push(luaMacros(r.macros));
+    if (Array.isArray(r.links) && r.links.length) {
+      lines.push(`\t\t\tlinks = { ${r.links.map(l => `{ label = ${luaStr(l.label)}, url = ${luaStr(l.url)} }`).join(', ')} },`);
+    }
+    if (Array.isArray(r.choices) && r.choices.length) {
+      lines.push(`\t\t\tchoices = { ${r.choices.map(luaStr).join(', ')} },`);
+    }
     if (Array.isArray(r.steps) && r.steps.length) {
       lines.push(`\t\t\tsteps = { ${r.steps.map(luaStr).join(', ')} },`);
     }
@@ -551,6 +567,77 @@ function luaMacros(macros) {
   return `\t\t\tmacros = { ${macros.map(m => `{ name = ${luaStr(m.name)}, body = ${luaStr(m.body)}, icon = ${m.icon == null ? 'nil' : typeof m.icon === 'number' ? m.icon : luaStr(m.icon)}, char = ${m.char ? 'true' : 'false'}, risky = ${m.risky ? 'true' : 'false'} }`).join(', ')} },`;
 }
 
+// ---------------------------------------------------------------------------
+// Links and choices
+// ---------------------------------------------------------------------------
+//
+// URLs in a reply (and issue keys, when the bridge knows the tracker's address)
+// become buttons; a click sends the URL back as an "o" record and the bridge
+// opens it in the browser. A ```choices block becomes quick-reply buttons.
+
+const LINK_LIMITS = { perReply: 8, label: 40, url: 2000 };
+const CHOICE_LIMITS = { perReply: 5, text: 80 };
+const CHOICES_RE = /```choices[^\n]*\n([\s\S]*?)```\n?/g;
+const URL_RE = /https?:\/\/[^\s<>"'`|\]\[)(]+(?:\([^\s<>"'`|()]*\)[^\s<>"'`|\]\[)(]*)*/g;
+const ISSUE_KEY_RE = /\b([A-Z][A-Z0-9]{1,15}-\d{1,7})\b/g;
+
+const isOpenableUrl = u => typeof u === 'string' && u.length <= LINK_LIMITS.url && /^https?:\/\/[^\s\x00-\x1f\x7f]+$/i.test(u);
+
+// A short button label for a URL: "repo#12" for GitHub pull requests and
+// issues, the key for a Jira issue, else host plus the end of the path.
+function linkLabel(url) {
+  let u;
+  try { u = new URL(url); } catch { return firstChars(url, LINK_LIMITS.label); }
+  const parts = u.pathname.split('/').filter(Boolean);
+  let label;
+  const gh = u.hostname.endsWith('github.com') && parts.length >= 4 && /^(pull|issues)$/.test(parts[2]) && /^\d+$/.test(parts[3]);
+  if (gh) label = `${parts[1]}#${parts[3]}`;
+  else if (parts[0] === 'browse' && parts[1] && /^[A-Z][A-Z0-9]+-\d+$/.test(parts[1])) label = parts[1];
+  else {
+    const tail = parts.slice(-2).join('/');
+    label = u.hostname.replace(/^www\./, '') + (tail ? '/' + decodeURIComponentSafe(tail) : '');
+  }
+  return Array.from(label).length > LINK_LIMITS.label ? firstChars(label, LINK_LIMITS.label - 3) + '...' : label;
+}
+
+function decodeURIComponentSafe(s) {
+  try { return decodeURIComponent(s); } catch { return s; }
+}
+
+// [{ label, url }]: every URL in the text, then issue keys that no URL already
+// covers (only with a tracker address, e.g. https://example.atlassian.net).
+function extractLinks(text, opts = {}) {
+  const src = String(text ?? '');
+  const out = [], seen = new Set();
+  const add = (url, label) => {
+    if (out.length >= LINK_LIMITS.perReply || seen.has(url) || !isOpenableUrl(url)) return;
+    seen.add(url);
+    out.push({ label: label || linkLabel(url), url });
+  };
+  for (const m of src.matchAll(URL_RE)) add(m[0].replace(/[.,;:!?'"*_~]+$/, ''));
+  const base = String(opts.jiraUrl || '').replace(/\/+$/, '');
+  if (/^https?:\/\//i.test(base)) {
+    const covered = new Set(out.map(l => l.label));
+    for (const m of src.replace(URL_RE, ' ').matchAll(ISSUE_KEY_RE)) {
+      if (!covered.has(m[1])) { covered.add(m[1]); add(`${base}/browse/${m[1]}`, m[1]); }
+    }
+  }
+  return out;
+}
+
+// { text, choices }: the ```choices blocks taken out of the text.
+function extractChoices(text) {
+  const choices = [];
+  const out = String(text ?? '').replace(CHOICES_RE, (_, body) => {
+    for (const raw of String(body).replace(/\r/g, '').split('\n')) {
+      const line = raw.replace(/^\s*(?:[-*•]|\d+[.)])\s+/, '').replace(/[\x00-\x1f\x7f]/g, '').trim();
+      if (line && choices.length < CHOICE_LIMITS.perReply && !choices.includes(line)) choices.push(firstChars(line, CHOICE_LIMITS.text));
+    }
+    return '';
+  }).replace(/\n{3,}/g, '\n\n').trim();
+  return { text: out, choices };
+}
+
 module.exports = {
   fromHex, pad3, slotNumber, chatKey, sessKey,
   alreadyHandled, markHandled, pruneStale, MONTH_MS,
@@ -560,4 +647,5 @@ module.exports = {
   luaStr, luaTable, SILENT_WAV,
   MAP_LIMITS, validateMapCommand, newMap, applyMapCommands, extractMapBlocks, parseMapFile, luaMap,
   MACRO_LIMITS, extractMacros, stripMacroBlocks, luaMacros,
+  LINK_LIMITS, CHOICE_LIMITS, extractLinks, extractChoices, linkLabel, isOpenableUrl,
 };

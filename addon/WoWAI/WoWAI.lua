@@ -270,8 +270,8 @@ local function InitDB()
 	end
 end
 
-local function AddHistory(chat, role, text, id, denied, agent, macros)
-	table.insert(chat.history, { role = role, text = text, id = id, t = time(), denied = denied, agent = agent, macros = macros })
+local function AddHistory(chat, role, text, id, denied, agent, macros, links, choices)
+	table.insert(chat.history, { role = role, text = text, id = id, t = time(), denied = denied, agent = agent, macros = macros, links = links, choices = choices })
 	while #chat.history > MAX_HISTORY do
 		table.remove(chat.history, 1)
 	end
@@ -751,7 +751,7 @@ local function ApplyReplies(replies)
 			MarkAcked(r.id)
 			local denied = type(r.denied) == "table" and #r.denied > 0 and r.denied or nil
 			if r.status == "done" then
-				Finish(c, "assistant", r.text or "", denied, r.agent, r.summary, WoWAI.CleanMacros(r.macros))
+				Finish(c, "assistant", r.text or "", denied, r.agent, r.summary, WoWAI.CleanMacros(r.macros), WoWAI.CleanLinks(r.links), WoWAI.CleanChoices(r.choices))
 			elseif r.status == "error" then
 				Finish(c, "system", "Bridge error: " .. tostring(r.text), denied)
 			elseif r.status == "working" then
@@ -889,7 +889,7 @@ local function Tick()
 		-- A hello only needs the bridge to have been seen; it never escalates.
 		-- A forget is the same, but the bridge must have been seen a moment after
 		-- the record went up, so it had a chance to read it.
-		if (rec.hello or rec.forget) and not rec.acked and run.bridgeSeen and run.bridgeSeen >= rec.sentAt + (rec.forget and 2 or 0) then
+		if (rec.hello or rec.forget or rec.open) and not rec.acked and run.bridgeSeen and run.bridgeSeen >= rec.sentAt + ((rec.forget or rec.open) and 2 or 0) then
 			NoteAcked(rec)
 			changed = true
 		end
@@ -906,8 +906,8 @@ local function Tick()
 				-- Nobody picked it up: show it again.
 				rec.sentAt = now
 				changed = true
-			elseif rec.forget then
-				-- The bridge is away; db.forget keeps it for the next hello.
+			elseif rec.forget or rec.open then
+				-- The bridge is away; db.forget keeps a forget for the next hello. A link click is dropped.
 				run.outbound[id] = nil
 				changed = true
 			else
@@ -958,8 +958,8 @@ local function ProcessInbox()
 	if inbox.map and WoWAIMap then WoWAIMap.Sync(inbox.map) end
 end
 
-Finish = function(chat, role, text, denied, agent, summary, macros)
-	AddHistory(chat, role, text, chat.pendingId, denied, agent, macros)
+Finish = function(chat, role, text, denied, agent, summary, macros, links, choices)
+	AddHistory(chat, role, text, chat.pendingId, denied, agent, macros, links, choices)
 	chat.pendingId = nil
 	chat.progress = nil
 	chat.stepsShown = nil
@@ -1349,6 +1349,74 @@ local function SendForget(chatId)
 	db.lastSeq = db.lastSeq + 1
 	run.outbound[db.lastSeq] = { chat = chatId, cwd = info.cwd or "", flags = "d", name = info.name or "", text = "", sentAt = GetTime(), forget = chatId }
 	RefreshStrip()
+end
+
+-- A link button: the bridge opens the URL in the browser on the player's computer
+-- (the game can't). Without the bridge, the copy box is the way out.
+function WoWAI.OpenLink(url)
+	if type(url) ~= "string" or not url:match("^https?://") then return end
+	if db.settings.mode ~= "pixel" or not WoWAI.IsConnected() then
+		WoWAI.ShowCopy(url)
+		print("|cff66ccff[WoW AI]|r the bridge isn't connected, so the link is in the copy box")
+		return
+	end
+	for _, rec in pairs(run.outbound) do
+		if rec.open and rec.text == url and not rec.acked then return end
+	end
+	db.lastSeq = db.lastSeq + 1
+	run.outbound[db.lastSeq] = { chat = "", cwd = "", flags = "o", name = "", text = url, sentAt = GetTime(), open = true }
+	RefreshStrip()
+	print("|cff66ccff[WoW AI]|r opening " .. Display(url) .. " in your browser")
+end
+
+-- The reply with this id in chat c (assistant entries carry their request's id).
+local function FindReply(c, msgId)
+	for i = #c.history, 1, -1 do
+		local m = c.history[i]
+		if m.role == "assistant" and m.id == msgId then return m, i end
+	end
+end
+
+-- A quick-reply button: send that option as the player's next message. Only the
+-- newest reply's options count, and only while the chat isn't waiting.
+function WoWAI.Pick(chatId, msgId, k)
+	local c = FindChat(chatId)
+	if not c then return end
+	local m, i = FindReply(c, msgId)
+	local choice = m and type(m.choices) == "table" and m.choices[k]
+	if not choice or c.pendingId or i ~= #c.history then
+		print("|cff66ccff[WoW AI]|r that choice is no longer current")
+		return
+	end
+	if db.activeChat ~= c.id then WoWAI.SwitchChat(c.id) end
+	WoWAI.Send(choice)
+end
+
+function WoWAI.OpenReplyLink(chatId, msgId, k)
+	local c = FindChat(chatId)
+	local m = c and FindReply(c, msgId)
+	local l = m and type(m.links) == "table" and m.links[k]
+	if type(l) == "table" then WoWAI.OpenLink(l.url) end
+end
+
+function WoWAI.CleanLinks(list)
+	if type(list) ~= "table" then return nil end
+	local out = {}
+	for _, l in ipairs(list) do
+		if type(l) == "table" and type(l.url) == "string" and l.url:match("^https?://") then
+			out[#out + 1] = { label = type(l.label) == "string" and l.label ~= "" and l.label or l.url, url = l.url }
+		end
+	end
+	return #out > 0 and out or nil
+end
+
+function WoWAI.CleanChoices(list)
+	if type(list) ~= "table" then return nil end
+	local out = {}
+	for _, v in ipairs(list) do
+		if type(v) == "string" and v:match("%S") then out[#out + 1] = v end
+	end
+	return #out > 0 and out or nil
 end
 
 local function ForgetOnBridge(c)
@@ -1923,6 +1991,52 @@ function WoWAI.UpdateStatus()
 	WoWAI.UpdateMini()
 end
 
+-- Small buttons under a bubble's text, left to right, wrapping into rows.
+-- Returns the bubble's extra height with them.
+local function FlowButtons(b, pool, items, label, extra, width, setup)
+	b[pool] = b[pool] or {}
+	local x, top, shown = 0, extra, 0
+	for k, item in ipairs(items or {}) do
+		local btn = b[pool][k]
+		if not btn then
+			btn = CreateFrame("Button", nil, b, "UIPanelButtonTemplate")
+			btn:SetHeight(22)
+			setup(btn)
+			b[pool][k] = btn
+		end
+		btn.item, btn.k = item, k
+		btn:SetText(label(item))
+		local w = math.min(width - 24, math.max(50, (btn:GetFontString():GetStringWidth() or 0) + 24))
+		btn:SetWidth(w)
+		if x > 0 and x + w > width - 24 then x, top = 0, top + 26 end
+		btn:ClearAllPoints()
+		btn:SetPoint("TOPLEFT", b.body, "BOTTOMLEFT", x, -6 - top)
+		btn:Show()
+		x = x + w + 4
+		shown = k
+	end
+	for k = shown + 1, #b[pool] do b[pool][k]:Hide() end
+	return shown > 0 and (top + 28) or extra
+end
+
+local function SetupLinkButton(btn)
+	btn:SetScript("OnClick", function(self) WoWAI.OpenLink(self.item.url) end)
+	btn:SetScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+		GameTooltip:AddLine(Display(self.item.url), 1, 1, 1, true)
+		GameTooltip:AddLine("Click to open it in your browser", 0.6, 0.6, 0.6)
+		GameTooltip:Show()
+	end)
+	btn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+end
+
+local function SetupChoiceButton(btn)
+	btn:SetScript("OnClick", function(self)
+		local b = self:GetParent()
+		WoWAI.Pick(b.chatId, b.msgId, self.k)
+	end)
+end
+
 -- One message bubble: accent bar, colored label, timestamp, wrapped body.
 local function GetBubble(i)
 	local b = ui.bubbles[i]
@@ -1969,7 +2083,7 @@ function WoWAI.Render()
 		if not width or width < 80 then width = 400 end
 		ui.content:SetWidth(width)
 		local y, n = 0, 0
-		local function Place(role, text, when, dim, denied, agent, macros)
+		local function Place(role, text, when, dim, denied, agent, macros, links, choices, msgId)
 			n = n + 1
 			local b = GetBubble(n)
 			local st = ROLE_STYLE[role] or ROLE_STYLE.system
@@ -2027,6 +2141,10 @@ function WoWAI.Render()
 				shownMacros = k
 			end
 			for k = shownMacros + 1, #b.macroBtns do b.macroBtns[k]:Hide() end
+			-- Links (opened in the browser by the bridge) and quick replies.
+			b.chatId, b.msgId = c.id, msgId
+			extra = FlowButtons(b, "linkBtns", links, function(l) return "|cff7ec8ff" .. Display(l.label) .. "|r" end, extra, width, SetupLinkButton)
+			extra = FlowButtons(b, "choiceBtns", choices, function(v) return Display(v) end, extra, width, SetupChoiceButton)
 			b:SetHeight(6 + 12 + 4 + h + 8 + extra)
 			b:ClearAllPoints()
 			b:SetPoint("TOPLEFT", ui.content, "TOPLEFT", 0, -y)
@@ -2038,7 +2156,9 @@ function WoWAI.Render()
 		for i, m in ipairs(c.history) do
 			-- The Allow button only makes sense on the newest reply, and only while idle.
 			local denied = (i == last and not c.pendingId and type(m.denied) == "table" and #m.denied > 0) and m.denied or nil
-			Place(m.role, m.text, m.t and date("%H:%M", m.t) or "", false, denied, m.agent, m.macros)
+			-- Quick replies too: only the newest reply's, and only while idle.
+			local choices = (i == last and not c.pendingId) and m.choices or nil
+			Place(m.role, m.text, m.t and date("%H:%M", m.t) or "", false, denied, m.agent, m.macros, m.links, choices, m.id)
 		end
 		if c.pendingId then
 			local p = c.progress
@@ -2178,6 +2298,22 @@ local function ChatLinks(chat)
 	return "  |Hwowai:reply:" .. chat.id .. "|h|cff55ff55[reply]|r|h |Hwowai:open:" .. chat.id .. "|h|cff7ec8ff[open]|r|h"
 end
 
+-- The newest reply's links and quick replies as clickable chat links, one line each.
+local function PrintReplyExtras(chat)
+	local m = chat.history[#chat.history]
+	if type(m) ~= "table" or m.role ~= "assistant" or not m.id then return end
+	local function Line(head, list, action, color, text)
+		if type(list) ~= "table" or #list == 0 then return end
+		local out = {}
+		for k, v in ipairs(list) do
+			out[#out + 1] = "|Hwowai:" .. action .. ":" .. chat.id .. ":" .. m.id .. ":" .. k .. "|h" .. color .. "[" .. Display(text(v)) .. "]|r|h"
+		end
+		print("    |cff888888" .. head .. "|r " .. table.concat(out, " "))
+	end
+	Line("links:", m.links, "url", "|cff7ec8ff", function(l) return l.label end)
+	Line("answer:", m.choices, "pick", "|cffffd100", function(v) return v end)
+end
+
 local SUMMARY_LINES = 3 -- lines of the agent's TL;DR block printed in "summary" mode
 local SUMMARY_FALLBACK_LINES = 2 -- lines of the reply shown when it came without one
 
@@ -2195,6 +2331,7 @@ local function EchoToChat(chat, text, agent, summary)
 		local flat = (body:gsub("%s+", " "))
 		if #flat > 200 then flat = flat:sub(1, 200) .. " ..." end
 		print(prefix .. flat .. ChatLinks(chat))
+		PrintReplyExtras(chat)
 		return
 	end
 	if mode == "summary" then
@@ -2214,6 +2351,7 @@ local function EchoToChat(chat, text, agent, summary)
 			print("    |cff888888... click [open] to read it all|r")
 		end
 		print("    " .. ChatLinks(chat):sub(3))
+		PrintReplyExtras(chat)
 		return
 	end
 	local limit = tonumber(mode) or ECHO_DEFAULT
@@ -2230,6 +2368,7 @@ local function EchoToChat(chat, text, agent, summary)
 		end
 	end
 	print("    " .. ChatLinks(chat):sub(3))
+	PrintReplyExtras(chat)
 end
 
 -- A reply landed. Always play the sound and echo it to the game chat; if that
@@ -2352,6 +2491,13 @@ end
 
 -- Clicks on our [reply] / [open] links in the chat frame.
 hooksecurefunc("SetItemRef", function(link)
+	-- [link] and [answer] buttons of a reply: wowai:url|pick:<chat>:<reply id>:<n>
+	local act, cid, msgId, k = tostring(link):match("^wowai:(%a+):(%w+):(%d+):(%d+)")
+	if act and db then
+		if act == "url" then WoWAI.OpenReplyLink(cid, tonumber(msgId), tonumber(k))
+		elseif act == "pick" then WoWAI.Pick(cid, tonumber(msgId), tonumber(k)) end
+		return
+	end
 	local action, chatId = tostring(link):match("^wowai:(%a+):(%w+)")
 	if not action or not db then return end
 	if FindChat(chatId) then WoWAI.SwitchChat(chatId) end

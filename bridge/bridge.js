@@ -190,6 +190,25 @@ function forgetChat(job) {
   log(`#${job.id}${job.session ? '@' + job.session : ''} forgot chat ${job.chat}${had ? '' : ' (nothing stored)'}`);
 }
 
+// Open a URL from a link button in the default browser. Only http(s): the URL
+// comes off the screen, so nothing else (file:, custom schemes) is ever launched.
+function openUrl(job) {
+  const url = String(job.text || '').trim();
+  const tag = `#${job.id}${job.session ? '@' + job.session : ''}`;
+  if (!P.isOpenableUrl(url)) { log(`${tag} refused to open ${JSON.stringify(url.slice(0, 200))}: not an http(s) URL`); return; }
+  const [file, args] = process.platform === 'darwin' ? ['open', [url]]
+    : process.platform === 'win32' ? ['rundll32', ['url.dll,FileProtocolHandler', url]]
+    : ['xdg-open', [url]];
+  try {
+    const child = spawn(file, args, { detached: true, stdio: 'ignore', windowsHide: true });
+    child.on('error', e => log(`${tag} could not open ${url}: ${e.message}`));
+    child.unref();
+    log(`${tag} opened ${url}`);
+  } catch (e) {
+    log(`${tag} could not open ${url}: ${e.message}`);
+  }
+}
+
 let lastMtime = 0;
 const running = new Map(); // chatKey -> { job, child }
 const queued = new Map();  // chatKey -> job waiting for that chat (or for a free parallel slot)
@@ -476,6 +495,14 @@ function submit(job) {
     signal('ack', job.id, true);
     return;
   }
+  if (job.open) {
+    // A link button clicked in game: open it here. No agent run.
+    markHandled(job);
+    saveState();
+    signal('ack', job.id, true);
+    openUrl(job);
+    return;
+  }
   if (job.hello) {
     // The addon announcing itself: ack, offer a restore if its data is fresh,
     // and refresh the slots so it can read our clock. No agent run.
@@ -730,8 +757,10 @@ function finish(job, status, text, session, denied) {
   // A finished reply ends with the "TL;DR:" block the system prompt asks for:
   // that part is what the game chat prints; the window gets the whole reply.
   let summary = '';
-  let macros = [];
+  let macros = [], links = [], choices = [];
   if (status === 'done') {
+    ({ text, choices } = P.extractChoices(text));
+    links = P.extractLinks(text, { jiraUrl: cfg.jiraUrl });
     ({ text, summary } = P.splitSummary(text));
     // After the split: a macro block the agent put after "TL;DR:" must not end up
     // in the game-chat summary.
@@ -741,7 +770,7 @@ function finish(job, status, text, session, denied) {
     summary = P.stripMacroBlocks(summary);
   }
   noteMessage(job, status === 'done' ? 'assistant' : 'system', status === 'done' ? text : 'Bridge error: ' + text);
-  publish(chatKey(job), { chat: job.chat, id: job.id, status, text, summary, cwd: job.cwd, session, denied, macros, agent: job.agent || '' }, true);
+  publish(chatKey(job), { chat: job.chat, id: job.id, status, text, summary, cwd: job.cwd, session, denied, macros, links, choices, agent: job.agent || '' }, true);
   signal('sig', job.id, true);
   log(`#${job.id}${job.session ? '@' + job.session : ''} ${status} (${text.length} chars${summary ? ', summary ' + summary.length : ', no summary'})`);
   drainQueue();

@@ -13,7 +13,7 @@ test('luaStr escapes everything Lua 5.1 needs', () => {
 });
 
 test('parseFlags reads new-session, hello, forget, context, agent and allow lists', () => {
-  const none = { newSession: false, hello: false, forget: false, context: false, dev: false, allow: [], agent: '' };
+  const none = { newSession: false, hello: false, forget: false, open: false, context: false, dev: false, allow: [], agent: '' };
   assert.deepEqual(P.parseFlags(''), none);
   assert.deepEqual(P.parseFlags('n'), { ...none, newSession: true });
   assert.deepEqual(P.parseFlags('h'), { ...none, hello: true });
@@ -29,7 +29,7 @@ test('jobsFromStrip parses the current record format and keeps separators inside
   const rec = ['sess', 'chat1', '12', 'realms', 'allow=WebSearch', 'My chat', 'hello\x1Fworld'].join('\x1F');
   const jobs = P.jobsFromStrip(12, rec);
   assert.equal(jobs.length, 1);
-  assert.deepEqual(jobs[0], { session: 'sess', chat: 'chat1', id: 12, cwd: 'realms', newSession: false, hello: false, forget: false, context: false, dev: false, allow: ['WebSearch'], agent: '', name: 'My chat', text: 'hello\x1Fworld', via: 'pixel' });
+  assert.deepEqual(jobs[0], { session: 'sess', chat: 'chat1', id: 12, cwd: 'realms', newSession: false, hello: false, forget: false, open: false, context: false, dev: false, allow: ['WebSearch'], agent: '', name: 'My chat', text: 'hello\x1Fworld', via: 'pixel' });
   // A chat that picked its own agent says so in the flags.
   const codex = P.jobsFromStrip(13, ['sess', 'chat1', '13', '', 'agent=codex', 'My chat', 'hi'].join('\x1F'))[0];
   assert.equal(codex.agent, 'codex');
@@ -204,4 +204,52 @@ test('luaTable carries the steps a working record has finished so far', () => {
   const body = P.luaTable('WoWAI_SlotData', [{ chat: 'c1', id: 3, status: 'working', text: 'edit a.lua', steps: ['Read the code', 'Fix "quotes"'] }]);
   assert.match(body, /steps = \{ "Read the code", "Fix \\"quotes\\"" \},/);
   assert.doesNotMatch(P.luaTable('X', [{ chat: 'c1', id: 3, status: 'working', text: '' }]), /steps/);
+});
+
+test('extractLinks turns URLs and, with a Jira address, issue keys into labelled links', () => {
+  const text = 'PR: https://github.com/acme/app/pull/42. Docs (https://example.com/docs/setup/intro), again https://github.com/acme/app/pull/42\n' +
+    'Ticket RMBO24-601 and https://acme.atlassian.net/browse/RMBO24-7 plus a branch RMBO24-601-api.';
+  assert.deepEqual(P.extractLinks(text), [
+    { label: 'app#42', url: 'https://github.com/acme/app/pull/42' },
+    { label: 'example.com/setup/intro', url: 'https://example.com/docs/setup/intro' },
+    { label: 'RMBO24-7', url: 'https://acme.atlassian.net/browse/RMBO24-7' },
+  ]);
+  const withJira = P.extractLinks(text, { jiraUrl: 'https://acme.atlassian.net/' });
+  assert.deepEqual(withJira.map(l => l.label), ['app#42', 'example.com/setup/intro', 'RMBO24-7', 'RMBO24-601']);
+  assert.equal(withJira[3].url, 'https://acme.atlassian.net/browse/RMBO24-601');
+  assert.equal(P.extractLinks(Array.from({ length: 20 }, (_, i) => `https://x.io/${i}`).join(' ')).length, P.LINK_LIMITS.perReply);
+  assert.deepEqual(P.extractLinks('file:///etc/passwd javascript:alert(1)'), []);
+});
+
+test('isOpenableUrl only lets plain http(s) URLs through', () => {
+  assert.ok(P.isOpenableUrl('https://example.com/a?b=1&c=2'));
+  for (const bad of ['file:///etc/passwd', 'ftp://x', 'https://x y', 'https://x\n', 'open -a Calculator', '']) assert.ok(!P.isOpenableUrl(bad), bad);
+});
+
+test('extractChoices takes the choices block out of the reply, before or after TL;DR', () => {
+  const r = P.extractChoices('Tests pass. Commit?\n\n```choices\n- Yes, commit and push\n2. No, show the diff\n\nYes, commit and push\n```\n\nTL;DR:\nReady to commit.');
+  assert.deepEqual(r.choices, ['Yes, commit and push', 'No, show the diff']);
+  assert.equal(r.text, 'Tests pass. Commit?\n\nTL;DR:\nReady to commit.');
+  const after = P.extractChoices('Done.\nTL;DR:\nPick one.\n```choices\nA\nB\nC\nD\nE\nF\n```');
+  assert.equal(after.choices.length, P.CHOICE_LIMITS.perReply);
+  assert.equal(P.splitSummary(after.text).summary, 'Pick one.');
+});
+
+test('the "o" flag asks the bridge to open a URL', () => {
+  assert.equal(P.parseFlags('o').open, true);
+  assert.equal(P.parseFlags('n;dev').open, false);
+});
+
+test('luaTable carries a reply\'s links and choices', () => {
+  const body = P.luaTable('X', [{ chat: 'c1', id: 3, status: 'done', text: 't', links: [{ label: 'app#42', url: 'https://github.com/acme/app/pull/42' }], choices: ['Yes', 'No "way"'] }]);
+  assert.match(body, /links = \{ \{ label = "app#42", url = "https:\/\/github.com\/acme\/app\/pull\/42" \} \},/);
+  assert.match(body, /choices = \{ "Yes", "No \\"way\\"" \},/);
+});
+
+test('the system prompt tells every chat about link buttons and the choices block', () => {
+  for (const ctx of ['', 'Character: Lumis']) {
+    const sp = P.systemPrompt(ctx, '');
+    assert.match(sp, /```choices/);
+    assert.match(sp, /opens it in the browser/);
+  }
 });

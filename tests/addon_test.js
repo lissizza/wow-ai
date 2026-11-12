@@ -829,3 +829,49 @@ test('/wow-ai steps off stops step announcements', () => {
   vm.run('STUB.now = STUB.now + 6; STUB.Tick()');
   assert.doesNotMatch(vm.evaluate('table.concat(STUB.prints, "\\n")'), /quiet/);
 });
+
+test('a reply\'s links open through the bridge and its choices send a quick reply', () => {
+  const vm = newVM();
+  login(vm, { dev: true });
+  connect(vm);
+  vm.run('WoWAI.Toggle(true)');
+  vm.run('WoWAI.Send("commit?")');
+  const chatId = vm.evaluate('WoWAIDB.chats[1].id');
+  const id = vm.num('WoWAIDB.chats[1].pendingId');
+  vm.run('STUB.prints = {}');
+  nextSlot(vm, `{ now = time(), cwd = "", replies = { { chat = "${chatId}", id = ${id}, status = "done", text = "Tests pass. Commit?", summary = "Commit?",
+    links = { { label = "app#42", url = "https://github.com/acme/app/pull/42" }, { label = "bad", url = "file:///etc/passwd" } },
+    choices = { "Yes, commit", "No" } } } }`);
+  vm.run('STUB.now = STUB.now + 6; STUB.Tick()'); // first scheduled poll is 5 s after sending
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].pendingId'), null);
+  assert.equal(vm.evaluate('#WoWAIDB.chats[1].history[2].links'), '1', 'only http(s) links are kept');
+  const prints = vm.evaluate('table.concat(STUB.prints, "\\n")');
+  assert.ok(prints.includes(`|Hwowai:url:${chatId}:${id}:1|h|cff7ec8ff[app#42]|r|h`), 'links line in the game chat');
+  assert.ok(prints.includes(`|Hwowai:pick:${chatId}:${id}:2|h|cffffd100[No]|r|h`), 'answer line in the game chat');
+
+  // Clicking the link puts an "o" record with the URL on the strip; nothing goes to the agent.
+  vm.run(`SetItemRef("wowai:url:${chatId}:${id}:1", "[app#42]", "LeftButton")`);
+  const open = stripRecords(vm).find(r => r.flags === 'o');
+  assert.ok(open, 'open record on the strip');
+  assert.equal(open.text, 'https://github.com/acme/app/pull/42');
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].pendingId'), null);
+  // The same link twice while unread by the bridge: one record.
+  vm.run('WoWAI.OpenLink("https://github.com/acme/app/pull/42")');
+  assert.equal(stripRecords(vm).filter(r => r.flags === 'o').length, 1);
+
+  // Clicking an answer sends it as the next message; after that the old choices are stale.
+  vm.run(`SetItemRef("wowai:pick:${chatId}:${id}:1", "[Yes, commit]", "LeftButton")`);
+  assert.ok(vm.num('WoWAIDB.chats[1].pendingId') > id);
+  assert.ok(stripRecords(vm).find(r => r.text === 'Yes, commit'));
+  vm.run('STUB.prints = {}');
+  vm.run(`WoWAI.Pick("${chatId}", ${id}, 2)`);
+  assert.match(vm.evaluate('table.concat(STUB.prints, "\\n")'), /no longer current/);
+});
+
+test('without the bridge a link opens in the copy box instead', () => {
+  const vm = newVM();
+  login(vm, { dev: true });
+  vm.run('WoWAI.OpenLink("https://example.com/x")');
+  assert.equal(stripRecords(vm).filter(r => r.flags === 'o').length, 0);
+  assert.match(vm.evaluate('table.concat(STUB.prints, "\\n")'), /copy box/);
+});
