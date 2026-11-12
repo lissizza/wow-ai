@@ -59,6 +59,32 @@ function png(width, height, rgb) {
   ]);
 }
 
+// A Retina Mac whose game renders below the panel's resolution: macOS scales the
+// frame up, so a cell is CELL * scale pixels wide and the strip starts under the
+// menu bar. Cells are resampled per pixel, and the pixel where two cells meet is
+// their average, as macOS's filtering leaves it.
+function renderScaled(cells, jitter, scale, offY) {
+  const pitch = CELL * scale;
+  const W = Math.ceil(CELLS * pitch) + 8, H = Math.ceil(Math.ceil(cells.length / CELLS) * pitch) + offY + 8;
+  const rgb = Buffer.alloc(W * H * 3, 0x30);
+  const level = v => [Math.floor(v / 4) % 2, Math.floor(v / 2) % 2, v % 2].map(l => l * 255);
+  const at = (fx, fy) => {
+    const c = Math.floor(fx / pitch), r = Math.floor(fy / pitch), i = r * CELLS + c;
+    return c < CELLS && i < cells.length ? level(cells[i]) : null;
+  };
+  for (let y = offY; y < H; y++) for (let x = 0; x < W; x++) {
+    const a = at(x, y - offY), b = at(x + 0.999, y - offY + 0.999);
+    if (!a) continue;
+    const o = (y * W + x) * 3;
+    for (let k = 0; k < 3; k++) {
+      const val = b ? (a[k] + b[k]) / 2 : a[k];
+      const n = jitter ? Math.round((Math.random() * 2 - 1) * jitter) : 0;
+      rgb[o + k] = Math.max(0, Math.min(255, Math.round(val + n)));
+    }
+  }
+  return png(W, H, rgb);
+}
+
 // Pure-primary cells, random noise, and a gamma curve like the in-game sliders.
 function render(cells, jitter, gamma) {
   const W = CELLS * CELL, H = MAXROWS * CELL;
@@ -94,18 +120,22 @@ const cases = [
   { id: 4242, payload: 'sess1\x1Fchat1\x1F4242\x1FC:\\x\x1Fn\x1F\x1F' + 'Refactor the player controller so jumping feels less floaty. '.repeat(40), jitter: 60, gamma: 0.6 },
   { id: 9, payload: 'sess1\x1Fchat1\x1F9\x1FC:\\x\x1F\x1F\x1F' + 'a fairly long paste: '.repeat(140), jitter: 100, gamma: 1.8 },
   { id: 65000, payload: '\x1F\x1F\x1F\x1F\x1F\x1Fx', jitter: 120, gamma: 1 },
+  // macOS only: a scaled-up client (a cell is 4.768 px, as measured on a MacBook) under the menu bar.
+  { id: 6, payload: 'sess\x1Fchat\x1F6\x1F\x1Fh;c\x1FChat 1\x1F' + 'Character: Lumis, level 5 Человек Паладин\n'.repeat(20), jitter: 30, gamma: 1, scale: 1.192, offY: 75, only: 'capture_mac.py' },
+  { id: 8, payload: 'sess\x1Fchat\x1F8\x1F\x1F\x1FChat 1\x1Fshort', jitter: 0, gamma: 1, scale: 1.5, offY: 52, only: 'capture_mac.py' },
 ];
 
 let pass = 0, total = 0;
 for (const t of cases) {
   const cells = encodeWithLua(t.id, t.payload);
   const file = path.join(TMP, `strip_${t.id}.png`);
-  fs.writeFileSync(file, render(cells, t.jitter, t.gamma));
+  fs.writeFileSync(file, t.scale ? renderScaled(cells, t.jitter, t.scale, t.offY) : render(cells, t.jitter, t.gamma));
   for (const [name, res] of decode(file)) {
+    if (t.only && name !== t.only) continue;
     total++;
     const ok = res.id === t.id && res.text === t.payload;
     if (ok) pass++;
-    console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}  id=${t.id}  bytes=${Buffer.byteLength(t.payload)}  cells=${cells.length}  rows=${Math.ceil(cells.length / CELLS)}  noise=±${t.jitter} gamma=${t.gamma}` + (ok ? '' : `\n   got ${JSON.stringify(res).slice(0, 200)}`));
+    console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}  id=${t.id}  bytes=${Buffer.byteLength(t.payload)}  cells=${cells.length}  rows=${Math.ceil(cells.length / CELLS)}  noise=±${t.jitter} gamma=${t.gamma}${t.scale ? ` scale=${t.scale}` : ''}` + (ok ? '' : `\n   got ${JSON.stringify(res).slice(0, 200)}`));
   }
 }
 console.log(pass === total ? '>>> CODEC ROUND-TRIP PASS' : '>>> CODEC ROUND-TRIP FAIL');

@@ -34,7 +34,7 @@ p.add_argument("--window-name", default="")
 p.add_argument("--test-image", default="")
 p.add_argument("--probe", default="")
 # macOS specific: how many pixels to search down for the strip (title bar + menu bar)
-p.add_argument("--y-slack", type=int, default=80, help="vertical search margin in physical pixels")
+p.add_argument("--y-slack", type=int, default=200, help="vertical search margin in physical pixels")
 # region to capture, in screen points (independent of Retina scale)
 p.add_argument("--region-w", type=int, default=1000)
 p.add_argument("--region-h", type=int, default=400)
@@ -55,26 +55,41 @@ def emit(obj):
 # Decoder: identical rules to capture.ps1 and capture_x11.py
 # ---------------------------------------------------------------------------
 
-def cell_value(px, c, r, ox=0, oy=0):
-    rr, gg, bb = px(ox + c * CELL + CELL // 2, oy + r * CELL + CELL // 2)
+# The addon draws CELL-pixel cells in the game's own resolution. On a Retina
+# Mac the game often renders below the panel's native resolution and macOS
+# scales it up, so in the screenshot a cell is CELL * scale pixels (4.8 for a
+# client at 1/1.2 of the panel). The pitch is therefore a parameter: found
+# coarsely through the magic, then fine-tuned until the checksum agrees, and
+# remembered in the hint for the next frames.
+MAGIC_CELLS = (6, 1, 6, 1, 5)  # 0xC71A as 3-bit cells; the 6th cell holds 1 magic bit + 2 id bits
+
+
+def cell_value(px, c, r, ox=0, oy=0, pitch=CELL):
+    try:
+        rr, gg, bb = px(int(ox + (c + 0.5) * pitch), int(oy + (r + 0.5) * pitch))
+    except IndexError:  # the search window can reach past a small capture's edge
+        return 0
     return (4 if rr >= 128 else 0) + (2 if gg >= 128 else 0) + (1 if bb >= 128 else 0)
 
 
-def has_magic(px, ox, oy):
-    acc = 0
-    for i in range(6):  # 18 bits cover the two magic bytes
-        acc = (acc << 3) | cell_value(px, i, 0, ox, oy)
-    return (acc >> 2) == 0xC71A
+def has_magic(px, ox, oy, pitch=CELL):
+    for i, want in enumerate(MAGIC_CELLS):  # cheap early exit: most offsets fail on the first cell
+        if cell_value(px, i, 0, ox, oy, pitch) != want:
+            return False
+    return (cell_value(px, 5, 0, ox, oy, pitch) >> 2) == 0
 
 
-def decode(px, ox=0, oy=0):
+def decode(px, ox=0, oy=0, pitch=CELL, width=None, height=None):
     acc = 0
     nbits = 0
     out = bytearray()
     needed = 6
     total = CELLS * MAXROWS
     for i in range(total):
-        acc = (acc << 3) | cell_value(px, i % CELLS, i // CELLS, ox, oy)
+        r = i // CELLS
+        if height is not None and oy + (r + 1) * pitch > height:
+            return {"error": "truncated"}
+        acc = (acc << 3) | cell_value(px, i % CELLS, r, ox, oy, pitch)
         nbits += 3
         while nbits >= 8:
             out.append((acc >> (nbits - 8)) & 0xFF)
@@ -104,18 +119,77 @@ def decode(px, ox=0, oy=0):
     return {"id": out[2] * 256 + out[3], "text": text}
 
 
-def find_and_decode(px, width, height, hint):
-    """Decode at the last good offset, else search a top-left window for the magic.
-    The vertical search window is larger because the macOS title bar pushes the
-    UIParent top-left down."""
-    cands = [hint] if hint else []
-    cands += [(dx, dy) for dy in range(YSLACK + 1) for dx in range(XSLACK + 1)]
-    for ox, oy in cands:
-        if ox + W > width or oy + H > height:
+def fits(width, ox, pitch):
+    return ox + CELLS * pitch <= width
+
+
+def refine(px, width, height, ox, oy, pitch):
+    """Around a magic hit, find the pitch (and a pixel or two of offset) at which
+    the whole frame decodes with a valid checksum. A wrong pitch drifts by
+    CELLS * error over one row, so it has to be right to well under 1%."""
+    first = None
+    steps = [0.0] + [k * 0.004 * sgn for k in range(1, 50) for sgn in (1, -1)]
+    for d in steps:
+        p = pitch + d
+        if p < 2 or not fits(width, ox, p):
             continue
-        if has_magic(px, ox, oy):
-            return decode(px, ox, oy), (ox, oy)
-    return None, hint
+        for dy in (0, 1, -1):
+            for dx in (0, 1, -1):
+                x, y = ox + dx, oy + dy
+                if x < 0 or y < 0 or not has_magic(px, x, y, p):
+                    continue
+                res = decode(px, x, y, p, width, height)
+                if res and "error" not in res:
+                    return res, (x, y, p)
+                if first is None:
+                    first = res
+    return first, None
+
+
+# Pitches tried when nothing is known yet: the native one first, then the
+# usual Retina/scaled ones, then a sweep.
+PITCH_GUESSES = [CELL, CELL * 1.2, CELL * 1.25, CELL * 1.5, CELL * 2.0, CELL * 1.6, CELL * 1.33, CELL * 1.1]
+PITCH_GUESSES += [round(2.0 + k * 0.1, 2) for k in range(0, 81) if round(2.0 + k * 0.1, 2) not in PITCH_GUESSES]
+
+
+def find_and_decode(px, width, height, hint, sweep=True):
+    """Decode at the last good offset and pitch, else search a top-left window
+    for the magic over a range of pitches. The vertical search window is larger
+    because the macOS title bar or menu bar pushes the UIParent top-left down.
+    The hint is (ox, oy, pitch). With sweep=False and a hint, only the hinted
+    pitch is searched: a full sweep costs most of a second in Python."""
+    if hint:
+        ox, oy, p = hint
+        if fits(width, ox, p) and has_magic(px, ox, oy, p):
+            res = decode(px, ox, oy, p, width, height)
+            if res and "error" not in res:
+                return res, hint
+            found, h = refine(px, width, height, ox, oy, p)
+            return found, (h or hint)
+    pitches = PITCH_GUESSES
+    if hint:  # the strip moved: try the known pitch first
+        pitches = [hint[2]] + ([p for p in PITCH_GUESSES if p != hint[2]] if sweep else [])
+    # The first cells survive a wrong pitch (the drift only adds up further
+    # along the row), so a magic hit at one pitch is not proof: keep going
+    # until a pitch decodes, and only then report the first failure seen.
+    failure = None
+    for p in pitches:
+        if not fits(width, 0, p):
+            continue
+        tried = set()
+        for oy in range(YSLACK + 1):
+            for ox in range(XSLACK + 1):
+                if has_magic(px, ox, oy, p):
+                    key = (ox // 3, oy // 3)
+                    if key in tried:
+                        continue
+                    tried.add(key)
+                    found, h = refine(px, width, height, ox, oy, p)
+                    if h:
+                        return found, h
+                    if found and failure is None:
+                        failure = found
+    return failure, hint
 
 
 # ---------------------------------------------------------------------------
@@ -388,6 +462,7 @@ def run():
     bounds = None
     bounds_at = 0
     hint = None
+    last_sweep = 0.0
     while True:
         start = time.time()
         # Refresh window bounds every 5 s so moving/resizing the window is picked up.
@@ -428,7 +503,13 @@ def run():
                 time.sleep(1)
                 continue
             px, width, height = read_png(tmp)
-            msg, hint = find_and_decode(px, width, height, hint)
+            # Once a pitch is known, frames without a strip only re-check that
+            # pitch; a full sweep (the window or game resolution may have
+            # changed) runs at most every 15 s.
+            sweep = hint is None or start - last_sweep >= 15
+            if sweep:
+                last_sweep = start
+            msg, hint = find_and_decode(px, width, height, hint, sweep)
             if msg and msg.get("error"):
                 if time.time() - last_warn >= 5:
                     last_warn = time.time()
