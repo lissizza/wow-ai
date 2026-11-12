@@ -25,6 +25,7 @@
 // start), it falls back to defaultCwd in config.json.
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const readline = require('readline');
 const { spawn } = require('child_process');
@@ -225,6 +226,17 @@ function importSessions(job) {
 
 const isFile = p => { try { return fs.statSync(p).isFile(); } catch { return false; } };
 
+// The editor's saved state (its open windows), or null. "cursor" reads Cursor's,
+// anything else VS Code's.
+function editorStorage(editor) {
+  const app = /cursor/i.test(editor) ? 'Cursor' : 'Code';
+  const home = os.homedir();
+  const base = process.platform === 'darwin' ? path.join(home, 'Library', 'Application Support')
+    : process.platform === 'win32' ? (process.env.APPDATA || path.join(home, 'AppData', 'Roaming'))
+    : path.join(home, '.config');
+  try { return JSON.parse(fs.readFileSync(path.join(base, app, 'User', 'globalStorage', 'storage.json'), 'utf8')); } catch { return null; }
+}
+
 // Open a file link in the editor: `<editor> -g file:line` (Cursor and VS Code both
 // take it), trying config.json "editor" (default "cursor"), then "code". Only an
 // existing regular file, and only ever as an argument to the editor.
@@ -234,11 +246,14 @@ function openInEditor(tag, link) {
   const editors = [...new Set([cfg.editor || 'cursor', 'code'])];
   const attempt = i => {
     if (i >= editors.length) { log(`${tag} could not open ${target}: no editor command found (set "editor" in config.json)`); return; }
+    // Name the window's folder too, so the file opens in that project's window.
+    const folder = P.editorWindowFolder(editorStorage(editors[i]), link.file);
+    const args = folder ? [folder, '-g', target] : ['-g', target];
     let child;
-    try { child = spawn(editors[i], ['-g', target], { detached: true, stdio: 'ignore', windowsHide: true }); }
+    try { child = spawn(editors[i], args, { detached: true, stdio: 'ignore', windowsHide: true }); }
     catch { attempt(i + 1); return; }
     child.on('error', () => attempt(i + 1));
-    child.on('spawn', () => log(`${tag} opened ${target} in ${editors[i]}`));
+    child.on('spawn', () => log(`${tag} opened ${target} in ${editors[i]}${folder ? ' (window ' + folder + ')' : ''}`));
     child.unref();
   };
   attempt(0);

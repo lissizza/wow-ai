@@ -618,6 +618,23 @@ function parseFileLink(u) {
   return { file: m[1], line: m[2] ? Number(m[2]) : 0 };
 }
 
+// The folder of the open editor window (Cursor / VS Code storage.json
+// windowsState) that holds `file` most closely, or null: the file then opens in
+// that project's window rather than whichever window was used last.
+function editorWindowFolder(storage, file) {
+  const ws = storage && storage.windowsState;
+  if (!ws) return null;
+  const wins = [ws.lastActiveWindow, ...(Array.isArray(ws.openedWindows) ? ws.openedWindows : [])];
+  let best = null;
+  for (const w of wins) {
+    if (!w || typeof w.folder !== 'string' || !w.folder.startsWith('file://')) continue;
+    let dir;
+    try { dir = decodeURIComponent(w.folder.slice('file://'.length)).replace(/\/+$/, ''); } catch { continue; }
+    if (dir && file.startsWith(dir + '/') && (!best || dir.length > best.length)) best = dir;
+  }
+  return best;
+}
+
 const isOpenableUrl = u => typeof u === 'string' && u.length <= LINK_LIMITS.url && /^https?:\/\/[^\s\x00-\x1f\x7f]+$/i.test(u);
 
 // A short button label for a URL: "repo#12" for GitHub pull requests and
@@ -706,5 +723,5 @@ module.exports = {
   luaStr, luaTable, SILENT_WAV,
   MAP_LIMITS, validateMapCommand, newMap, applyMapCommands, extractMapBlocks, parseMapFile, luaMap,
   MACRO_LIMITS, extractMacros, stripMacroBlocks, luaMacros,
-  LINK_LIMITS, CHOICE_LIMITS, extractLinks, extractChoices, linkLabel, isOpenableUrl, parseFileLink,
+  LINK_LIMITS, CHOICE_LIMITS, extractLinks, extractChoices, linkLabel, isOpenableUrl, parseFileLink, editorWindowFolder,
 };

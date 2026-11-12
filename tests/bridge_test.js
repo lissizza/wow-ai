@@ -281,3 +281,20 @@ test('parseFileLink accepts only absolute file:// links with an optional line', 
     assert.equal(P.parseFileLink(bad), null, bad);
   }
 });
+
+test('editorWindowFolder picks the open editor window whose folder holds the file most closely', () => {
+  const state = { windowsState: {
+    lastActiveWindow: { folder: 'file:///Users/me/dev/rm' },
+    openedWindows: [
+      { folder: 'file:///Users/me/dev/rm' },
+      { folder: 'file:///Users/me/dev/rm/rmbo-core' },
+      { folder: 'file:///Users/me/dev/My%20Notes' },
+      { workspace: { configPath: 'file:///x.code-workspace' } },
+    ],
+  } };
+  assert.equal(P.editorWindowFolder(state, '/Users/me/dev/rm/rmbo-core/lookup/models.py'), '/Users/me/dev/rm/rmbo-core');
+  assert.equal(P.editorWindowFolder(state, '/Users/me/dev/rm/clu/a.py'), '/Users/me/dev/rm');
+  assert.equal(P.editorWindowFolder(state, '/Users/me/dev/My Notes/n.md'), '/Users/me/dev/My Notes');
+  assert.equal(P.editorWindowFolder(state, '/Users/me/dev/rm-other/a.py'), null, 'a name prefix is not a parent folder');
+  assert.equal(P.editorWindowFolder({}, '/a/b.py'), null);
+});
