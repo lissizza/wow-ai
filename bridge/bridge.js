@@ -28,10 +28,11 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const readline = require('readline');
-const { spawn } = require('child_process');
+const { spawn, execFileSync } = require('child_process');
 const P = require('./protocol'); // the pure protocol code, unit-tested in tests/bridge_test.js
 const A = require('./agents');   // how each agent is launched and read, unit-tested in tests/agents_test.js
-const SI = require('./sessions_import'); // /wow-ai import: Claude sessions saved by the editor extension
+const SI = require('./sessions_import');
+const SF = require('./signal_files'); // /wow-ai import: Claude sessions saved by the editor extension
 
 const HERE = __dirname;
 const CONFIG_FILE = path.join(HERE, 'config.json');
@@ -430,9 +431,49 @@ function publish(key, record, urgent) {
   else if (!publishTimer) publishTimer = setTimeout(() => { publishTimer = null; publishNow(false); }, wait);
 }
 
+// How a signal file is turned off: emptied, or deleted for clients that play any
+// file that exists (see signal_files.js). config.json "signalStyle" overrides.
+const SIGNAL_STYLE = cfg.signalStyle === 'empty' || cfg.signalStyle === 'absent' ? cfg.signalStyle : SF.defaultStyle();
+const offFile = file => SF.setOff(file, SIGNAL_STYLE, atomicWrite);
+const SIGNAL_FILES = () => SF.signalFiles(cfg.addonDir, {
+  slots: SLOTS, actMax: cfg.actMax || 60, stepMax: cfg.stepMax || 30, presenceMax: cfg.presenceMax || 2000, syncMax: cfg.syncMax || 500,
+});
+
+// "absent" style: the game is up (the addon said hello), so every empty signal
+// file can go; ctl/empty.wav goes last and tells the addon the switch is done.
+function clearSignalFiles(why) {
+  if (SIGNAL_STYLE !== 'absent' || !fs.existsSync(path.join(cfg.addonDir, 'WoWAI', 'ctl'))) return;
+  const n = SF.clear(SIGNAL_FILES());
+  if (n) log(`signal files: removed ${n} empty ones (${why})`);
+}
+
+// "absent" style: the game is not running, so every signal file must exist again
+// for the next launch to see it.
+function restoreSignalFiles(why) {
+  if (SIGNAL_STYLE !== 'absent' || !fs.existsSync(path.join(cfg.addonDir, 'WoWAI', 'ctl'))) return;
+  const n = SF.restore(SIGNAL_FILES());
+  if (n) log(`signal files: recreated ${n} for the next game launch (${why})`);
+}
+
+// Whether the game runs: true, false, or null when this platform can't tell.
+function gameRunning() {
+  if (process.platform === 'win32') return null;
+  const name = process.platform === 'darwin' ? 'World of Warcraft' : cap.processName;
+  try { execFileSync('pgrep', ['-x', name], { stdio: 'ignore', timeout: 5000 }); return true; }
+  catch (e) { return e && e.status === 1 ? false : null; }
+}
+
+let gameWasRunning = null;
+function watchGame() {
+  const now = gameRunning();
+  if (now === false && gameWasRunning !== false) restoreSignalFiles(gameWasRunning ? 'the game quit' : 'the game is not running');
+  gameWasRunning = now;
+}
+
 function signal(kind, id, on) {
   const file = path.join(cfg.addonDir, 'WoWAI', kind, pad3(slotNumber(id)) + '.wav');
-  try { atomicWrite(file, on ? SILENT_WAV : Buffer.alloc(0)); } catch {}
+  if (on) { try { atomicWrite(file, SILENT_WAV); } catch {} }
+  else offFile(file);
 }
 
 // Heartbeat: act/NNN/kk.wav flips valid for the k-th action of message NNN. The
@@ -443,7 +484,7 @@ function actFile(id, k) {
   return path.join(cfg.addonDir, 'WoWAI', 'act', pad3(slotNumber(id)), String(k).padStart(2, '0') + '.wav');
 }
 function resetBeats(id) {
-  for (let k = 1; k <= ACT_MAX; k++) { try { atomicWrite(actFile(id, k), Buffer.alloc(0)); } catch {} }
+  for (let k = 1; k <= ACT_MAX; k++) offFile(actFile(id, k));
 }
 function beat(job) {
   job.beats = (job.beats || 0) + 1;
@@ -462,7 +503,7 @@ function stepFile(id, k) {
 }
 function resetSteps(id) {
   if (!fs.existsSync(path.join(cfg.addonDir, 'WoWAI', 'step'))) return;
-  for (let k = 1; k <= STEP_MAX; k++) { try { atomicWrite(stepFile(id, k), Buffer.alloc(0)); } catch {} }
+  for (let k = 1; k <= STEP_MAX; k++) offFile(stepFile(id, k));
 }
 function raiseStep(job, k) {
   if (k > STEP_MAX || !fs.existsSync(path.join(cfg.addonDir, 'WoWAI', 'step'))) return;
@@ -484,7 +525,7 @@ function presenceBeat() {
   try { atomicWrite(presenceFile(k), SILENT_WAV); } catch {}
   for (let j = 1; j <= 50; j++) {
     const n = ((k - 1 + j) % PRESENCE_MAX) + 1;
-    try { atomicWrite(presenceFile(n), Buffer.alloc(0)); } catch {}
+    offFile(presenceFile(n));
   }
   saveState();
 }
@@ -590,6 +631,7 @@ function submit(job) {
     saveState();
     signal('ack', job.id, true);
     maybeOfferRestore(job);
+    clearSignalFiles('the game said hello');
     // Even an empty set: a client holding layers from a reset bridge must drop them.
     mapShareUntil = Date.now() + MAP_SHARE_MS;
     publishNow();
@@ -889,7 +931,7 @@ function syncFlip() {
   const k = state.syncSig;
   try { atomicWrite(syncFile(k), SILENT_WAV); } catch {}
   for (let j = 1; j <= 50; j++) {
-    try { atomicWrite(syncFile(((k - 1 + j) % SYNC_MAX) + 1), Buffer.alloc(0)); } catch {}
+    offFile(syncFile(((k - 1 + j) % SYNC_MAX) + 1));
   }
 }
 
@@ -1043,6 +1085,11 @@ if (inject !== null) {
     if (running.size === 0) { console.log('nothing pending'); process.exit(0); }
   } else {
     setInterval(pollSavedVariables, cfg.pollMs || 750);
+    if (SIGNAL_STYLE === 'absent') {
+      watchGame();
+      if (gameWasRunning) clearSignalFiles('the game is running');
+      setInterval(watchGame, 15000);
+    }
     presenceBeat();
     setInterval(presenceBeat, cfg.presenceIntervalMs || 30000);
     syncTick();

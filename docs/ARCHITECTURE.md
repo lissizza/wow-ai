@@ -27,7 +27,7 @@ Two processes that can't talk to each other directly, and how they do anyway.
 WoW addons cannot open sockets, read files, run programs or receive input from other processes. What they *can* do that reaches outside:
 
 1. Draw pixels. Anything on screen can be captured by another process.
-2. Load files that already existed when the client launched, the first time each is used. Files created after launch are not discovered. A file that was already loaded keeps returning the cached content for the rest of the process, even across `/reload` (fonts, sounds, textures) — except addon **Lua code**, which is re-read on `/reload`. These rules were measured on a live Forever client by [wow-forever-codex](https://github.com/0xinuarashi/wow-forever-codex) and match what this project observes.
+2. Load files that already existed when the client launched, the first time each is used. Files created after launch are not discovered. A file that was already loaded keeps returning the cached content for the rest of the process, even across `/reload` (fonts, sounds, textures) — except addon **Lua code**, which is re-read on `/reload`. These rules were measured on a live Forever client by [wow-forever-codex](https://github.com/0xinuarashi/wow-forever-codex) and match what this project observes. The macOS client differs for sounds: `PlaySoundFile` accepts any file that exists, empty or not, but answers `nil` for a file deleted since launch, and notices it being recreated (no caching either way); see `signalStyle`.
 3. Write SavedVariables — but only on `/reload` or logout, and `ReloadUI()` can only be called from a hardware event (a key or click), never from a timer.
 
 Everything below follows from those three facts.

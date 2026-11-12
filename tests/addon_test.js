@@ -977,3 +977,34 @@ test('cancel puts queued messages back in the box', () => {
   assert.equal(vm.evaluate('WoWAIDB.chats[1].queued'), null);
   assert.equal(vm.evaluate('WoWAIInput:GetText()'), 'later one');
 });
+
+test('/wow-ai probe reports how the client answers each prepared sound file', () => {
+  const vm = newVM();
+  login(vm);
+  vm.run('SlashCmdList.WOWAI("probe")');
+  vm.run('STUB.RunTimers()');
+  const h = 'WoWAIDB.chats[1].history';
+  const text = vm.evaluate(`${h}[#${h}].text`);
+  assert.match(text, /^Probe:\n1991: /);
+  assert.match(text, /9999: /);
+});
+
+test('a client that plays any existing file waits for the bridge to delete ctl/empty.wav, then counts heartbeats', () => {
+  const vm = newVM();
+  const snd = p => `STUB.sounds["Interface\\\\AddOns\\\\WoWAI\\\\${p}"]`;
+  vm.run(`${snd('ctl\\\\valid.wav')} = true; ${snd('ctl\\\\empty.wav')} = true`);
+  login(vm);
+  connect(vm);
+  vm.run('SlashCmdList.WOWAI("diag")');
+  const h = 'WoWAIDB.chats[1].history';
+  assert.match(vm.evaluate(`${h}[#${h}].text`), /UNUSABLE \(self-test: an empty file reports as playable; waiting for the bridge/);
+  vm.run('WoWAI.Send("work")');
+  const slot = String(vm.num('WoWAIDB.chats[1].pendingId')).padStart(3, '0');
+  // The bridge deletes the empty marker: a few seconds later the channel is on.
+  vm.run(`${snd('ctl\\\\empty.wav')} = nil; STUB.now = STUB.now + 4; STUB.Tick()`);
+  vm.run(`${snd(`act\\\\${slot}\\\\01.wav`)} = true; ${snd(`act\\\\${slot}\\\\02.wav`)} = true; STUB.Tick()`);
+  vm.run('SlashCmdList.WOWAI("diag")');
+  const diag = vm.evaluate(`${h}[#${h}].text`);
+  assert.match(diag, /sound channel: usable \(self-test: passed \(the bridge deletes files/);
+  assert.match(diag, /heartbeat 2 beats/);
+});

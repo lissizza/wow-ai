@@ -6,6 +6,7 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ### Changed
 
+- Signals on macOS. The macOS client plays any file that exists, so empty "off" files read as raised and the addon disabled the sound-file channel (no acks, presence, heartbeat counts, quick steps or session sync; "0 actions" while the agent worked). There the bridge now turns a signal off by deleting the file (`signalStyle: "absent"`, the macOS default): on hello it deletes every empty signal file, `ctl/empty.wav` last, and when the game quits it recreates them for the next launch. The addon, seeing an empty file read as playable, waits for `ctl/empty.wav` to disappear and then turns the channel on. `/wow-ai probe` shows how the client answers a set of prepared files. Start the bridge before the game (or keep it running across game restarts) so the files exist at launch.
 - Messages typed while a chat waits for a reply are queued instead of kept as a single hidden draft (each one used to replace the previous, and nothing showed on screen). They appear under the running reply marked "queued", go out together as one message when the reply arrives, and `/wow-ai cancel` puts them back in the input box.
 
 ### Added

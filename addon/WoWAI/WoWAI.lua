@@ -681,7 +681,14 @@ local function SelfTestSignals()
 	end
 	local emptyLooksValid = SoundValid("Interface\\AddOns\\WoWAI\\ctl\\empty.wav")
 	local validLooksValid = SoundValid("Interface\\AddOns\\WoWAI\\ctl\\valid.wav")
-	if emptyLooksValid then
+	if emptyLooksValid and validLooksValid then
+		-- This client plays any file that exists (macOS does). The bridge then turns
+		-- signals off by deleting files instead, once the game is up, and deletes
+		-- ctl/empty.wav last: WaitForSignalSwitch turns the channel on when it's gone.
+		signalAvailable = false
+		run.signalSwitchWait = true
+		signalStats.selftest = "an empty file reports as playable; waiting for the bridge to switch the signal files"
+	elseif emptyLooksValid then
 		signalAvailable = false
 		signalStats.selftest = "an empty file reports as playable"
 	elseif not validLooksValid then
@@ -689,6 +696,23 @@ local function SelfTestSignals()
 		signalStats.selftest = "a valid file reports as unplayable (files not indexed? restart WoW)"
 	else
 		signalStats.selftest = "passed"
+	end
+end
+
+-- See SelfTestSignals: every few seconds, look whether the bridge has deleted
+-- ctl/empty.wav; then a missing file means "off" and the channel is usable.
+local function WaitForSignalSwitch(now)
+	if not run.signalSwitchWait or now < (run.signalSwitchNext or 0) then return end
+	run.signalSwitchNext = now + 3
+	local ok, willPlay, handle = pcall(PlaySoundFile, "Interface\\AddOns\\WoWAI\\ctl\\empty.wav", "Master")
+	if ok and willPlay and handle then pcall(StopSound, handle) end
+	if ok and not willPlay then
+		run.signalSwitchWait = nil
+		signalAvailable = true
+		signalStats.selftest = "passed (the bridge deletes files to turn signals off)"
+		-- Look for the presence and sync heads afresh, now that they can be read.
+		run.presence, run.sync = nil, nil
+		WoWAI.UpdateDot()
 	end
 end
 
@@ -960,6 +984,7 @@ end
 local function Tick()
 	if not db then return end
 	local now = GetTime()
+	WaitForSignalSwitch(now)
 	PollPresence()
 	PollSync()
 	-- Without presence beats, the only evidence is a slot read; spend one every
@@ -3251,7 +3276,7 @@ end
 
 local COMMAND_ARGS = {
 	mini = 0, min = 0, hide = 0, quit = 0, help = 0, clear = 0, delete = 0, reset = 0, copy = 0,
-	cancel = 0, resend = 0, reload = 0, refresh = 0, slots = 0, diag = 0,
+	cancel = 0, resend = 0, reload = 0, refresh = 0, slots = 0, diag = 0, probe = 0,
 	context = { [""] = true, on = true, off = true }, ctx = { [""] = true, on = true, off = true },
 	mode = { [""] = true, pixel = true, reload = true },
 	signal = { [""] = true, on = true, off = true }, longchat = { [""] = true, on = true, off = true },
@@ -3471,6 +3496,28 @@ SlashCmdList["WOWAI"] = function(msg)
 		end
 		WoWAI.Render()
 		WoWAI.Toggle(true)
+	elseif cmd == "probe" then
+		-- How this client answers PlaySoundFile for files the bridge prepared in
+		-- different shapes (presence/1991..1997; 9999 never existed). Each file is
+		-- read once per client run, so only the first probe means anything.
+		local out = {}
+		for _, i in ipairs({ 1991, 1992, 1993, 1994, 1995, 1996, 1997, 9999 }) do
+			local path = string.format("Interface\\AddOns\\WoWAI\\presence\\%04d.wav", i)
+			local ok, willPlay, handle = pcall(PlaySoundFile, path, "Master")
+			out[#out + 1] = { i = i, ok = ok, willPlay = willPlay, handle = handle }
+		end
+		C_Timer.After(0.3, function()
+			local lines = {}
+			for _, r in ipairs(out) do
+				local playing = "?"
+				if r.ok and r.handle and C_Sound and C_Sound.IsPlaying then playing = tostring(C_Sound.IsPlaying(r.handle)) end
+				lines[#lines + 1] = r.i .. ": " .. (r.ok and (tostring(r.willPlay) .. ", handle " .. tostring(r.handle) .. ", playing " .. playing) or ("error " .. tostring(r.willPlay)))
+				if r.ok and r.handle then pcall(StopSound, r.handle) end
+			end
+			AddHistory(c, "system", "Probe:\n" .. table.concat(lines, "\n"))
+			WoWAI.Render()
+			WoWAI.Toggle(true)
+		end)
 	elseif cmd == "diag" then
 		local free = 0
 		for i = 1, SLOT_COUNT do
