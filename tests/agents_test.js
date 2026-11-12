@@ -377,15 +377,21 @@ test('claude: each TodoWrite item is reported once, when it turns completed', ()
   assert.deepEqual(p.feed(todo([{ content: 'Read config', status: 'completed' }, { content: 'Add flag', status: 'completed' }])).steps, []);
 });
 
-test('claude: TaskCreate/TaskUpdate steps are matched back to their subject', () => {
+test('claude: TaskCreate/TaskUpdate steps are matched to their subject through the task id in the result', () => {
   const p = A.claudeParser();
-  const call = (name, input) => p.feed({ type: 'assistant', message: { content: [{ type: 'tool_use', name, input }] } }).steps;
-  assert.deepEqual(call('TaskCreate', { subject: 'Write tests' }), []);
-  assert.deepEqual(call('TaskCreate', { subject: 'Ship it' }), []);
-  assert.deepEqual(call('TaskUpdate', { taskId: '2', status: 'in_progress' }), []);
-  assert.deepEqual(call('TaskUpdate', { taskId: '2', status: 'completed' }), ['Ship it']);
-  assert.deepEqual(call('TaskUpdate', { taskId: '2', status: 'completed' }), [], 'only once');
-  assert.deepEqual(call('TaskUpdate', { taskId: '7', status: 'completed' }), ['task 7']);
+  const call = (name, input, id = 'toolu_' + name) => p.feed({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name, input }] } }).steps;
+  const result = (id, content) => p.feed({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, content }] } });
+  // A resumed session: ids continue from earlier runs, so creation order says nothing.
+  assert.deepEqual(call('TaskCreate', { subject: 'Write tests' }, 'tu1'), []);
+  result('tu1', 'Task #5 created successfully: Write tests');
+  assert.deepEqual(call('TaskCreate', { subject: 'Ship it' }, 'tu2'), []);
+  result('tu2', [{ type: 'text', text: 'Task #6 created successfully: Ship it' }]);
+  assert.deepEqual(call('TaskUpdate', { taskId: '6', status: 'in_progress' }), []);
+  assert.deepEqual(call('TaskUpdate', { taskId: '6', status: 'completed' }), ['Ship it']);
+  assert.deepEqual(call('TaskUpdate', { taskId: '6', status: 'completed' }), [], 'only once');
+  assert.deepEqual(call('TaskUpdate', { taskId: '5', status: 'completed' }), ['Write tests']);
+  // A task created in an earlier run: the id is all there is.
+  assert.deepEqual(call('TaskUpdate', { taskId: '2', status: 'completed' }), ['task 2']);
 });
 
 test('claude: a subagent\'s plan is not announced as the main agent\'s steps', () => {

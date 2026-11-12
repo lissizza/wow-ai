@@ -75,26 +75,38 @@ function stepTracker() {
 // Claude Code's plan tools: TodoWrite rewrites the whole list
 // ({ todos: [{ content, status }] }); newer versions create tasks one by one
 // (TaskCreate { subject }) and tick them off with TaskUpdate { taskId, status }.
-// Task ids are handed out in creation order starting at 1, which is how a
-// TaskUpdate that doesn't repeat the subject is matched back to its text.
+// The task's id is only in TaskCreate's result ("Task #3 created ..."), and a
+// resumed session keeps counting from where it was, so the subject is matched
+// to its id through that result rather than by creation order.
 function claudeSteps() {
   const tracker = stepTracker();
-  const tasks = [];
-  return (block) => {
-    const inp = block.input || {};
-    if (block.name === 'TodoWrite' && Array.isArray(inp.todos)) {
-      return tracker.update(inp.todos.map(t => ({ key: t.content, text: t.content, done: t.status === 'completed' })));
-    }
-    if (block.name === 'TaskCreate' && inp.subject) {
-      tasks.push(String(inp.subject));
+  const pending = new Map(); // TaskCreate tool_use id -> subject, until its result names the task id
+  const subjects = new Map(); // task id -> subject
+  return {
+    toolUse(block) {
+      const inp = block.input || {};
+      if (block.name === 'TodoWrite' && Array.isArray(inp.todos)) {
+        return tracker.update(inp.todos.map(t => ({ key: t.content, text: t.content, done: t.status === 'completed' })));
+      }
+      if (block.name === 'TaskCreate' && inp.subject) {
+        pending.set(block.id, String(inp.subject));
+        return [];
+      }
+      if (block.name === 'TaskUpdate' && inp.subject && inp.taskId != null) subjects.set(String(inp.taskId), String(inp.subject));
+      if (block.name === 'TaskUpdate' && inp.status === 'completed') {
+        const id = String(inp.taskId ?? '');
+        return tracker.update([{ key: 'task:' + id, text: subjects.get(id) || `task ${id}`, done: true }]);
+      }
       return [];
-    }
-    if (block.name === 'TaskUpdate' && inp.status === 'completed') {
-      const id = String(inp.taskId ?? '');
-      const text = inp.subject || tasks[Number(id) - 1] || `task ${id}`;
-      return tracker.update([{ key: 'task:' + id, text, done: true }]);
-    }
-    return [];
+    },
+    toolResult(block) {
+      const subject = pending.get(block.tool_use_id);
+      if (subject === undefined) return;
+      pending.delete(block.tool_use_id);
+      const content = Array.isArray(block.content) ? block.content.map(c => (c && c.text) || '').join(' ') : String(block.content || '');
+      const m = /#\s*(\d+)/.exec(content) || /\bid\W+(\d+)/i.exec(content);
+      if (m) subjects.set(m[1], subject);
+    },
   };
 }
 
@@ -122,9 +134,12 @@ function claudeParser() {
       const out = empty();
       if (ev.session_id) out.session = ev.session_id;
       // Subagents' events carry a parent_tool_use_id; their plans are their own.
+      if (ev.type === 'user' && !ev.parent_tool_use_id && ev.message && Array.isArray(ev.message.content)) {
+        for (const block of ev.message.content) if (block && block.type === 'tool_result') steps.toolResult(block);
+      }
       if (ev.type === 'assistant' && ev.message && Array.isArray(ev.message.content)) {
         for (const block of ev.message.content) {
-          if (block.type === 'tool_use' && !ev.parent_tool_use_id) out.steps.push(...steps(block));
+          if (block.type === 'tool_use' && !ev.parent_tool_use_id) out.steps.push(...steps.toolUse(block));
           if (block.type === 'tool_use') out.progress.push(describeToolUse(block));
           else if (block.type === 'text' && block.text && block.text.trim()) out.progress.push(snippet(block.text));
         }
