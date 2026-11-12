@@ -215,10 +215,72 @@ def run_osascript(script):
     return proc.stdout.strip()
 
 
+CG_WINDOWS_JXA = '''ObjC.import("CoreGraphics");
+const list = ObjC.castRefToObject($.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly | $.kCGWindowListExcludeDesktopElements, 0));
+const out = [];
+for (let i = 0; i < list.count; i++) {
+  const w = list.objectAtIndex(i);
+  if (ObjC.unwrap(w.objectForKey("kCGWindowLayer")) !== 0) continue;
+  const b = w.objectForKey("kCGWindowBounds");
+  out.push([ObjC.unwrap(w.objectForKey("kCGWindowOwnerPID")),
+            ObjC.unwrap(b.objectForKey("X")), ObjC.unwrap(b.objectForKey("Y")),
+            ObjC.unwrap(b.objectForKey("Width")), ObjC.unwrap(b.objectForKey("Height")),
+            ObjC.unwrap(w.objectForKey("kCGWindowOwnerName"))].join("\\t"));
+}
+out.join("\\n");'''
+
+
+def game_pids(want):
+    """PIDs of processes whose executable path contains the process name
+    (the client runs as ".../World of Warcraft.app/Contents/MacOS/World of Warcraft")."""
+    try:
+        proc = subprocess.run(["pgrep", "-f", want], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return set()
+    return {int(p) for p in proc.stdout.split() if p.strip().isdigit()}
+
+
+def find_window_bounds_cg(want):
+    """The game's largest on-screen window through CoreGraphics (JXA). Unlike
+    System Events this needs no Accessibility permission: window bounds and
+    owners are public. The owner is matched by PID, since the window server
+    names the client "Wow" while its process is "World of Warcraft".
+    Returns (x, y, w, h), None when no window is on screen, or raises."""
+    pids = game_pids(want)
+    proc = subprocess.run(["osascript", "-l", "JavaScript", "-e", CG_WINDOWS_JXA],
+                          capture_output=True, text=True, timeout=10)
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or "osascript (JavaScript) failed")
+    best = None
+    for line in proc.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 6:
+            continue
+        try:
+            pid = int(parts[0])
+            x, y, w, h = (int(float(v)) for v in parts[1:5])
+        except ValueError:
+            continue
+        if pid not in pids and want.lower() not in parts[5].lower():
+            continue
+        if w < 200 or h < 150:  # menus, tooltips, the Dock tile
+            continue
+        if best is None or w * h > best[2] * best[3]:
+            best = (x, y, w, h)
+    return best
+
+
 def find_window_bounds():
     """Return (x, y, w, h) in screen points for the best matching window."""
     want = args.process_name
     title = args.window_name
+
+    if not title:
+        try:
+            return find_window_bounds_cg(want)
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
+            # Fall back to System Events (needs Accessibility) below.
+            emit({"warn": "CoreGraphics window lookup failed (%s); trying System Events" % e})
 
     if title:
         script = '''tell application "System Events"
@@ -330,7 +392,24 @@ def run():
         start = time.time()
         # Refresh window bounds every 5 s so moving/resizing the window is picked up.
         if bounds is None or start - bounds_at > 5:
-            bounds = find_window_bounds()
+            try:
+                bounds = find_window_bounds()
+            except (RuntimeError, subprocess.TimeoutExpired) as e:
+                # Usually a missing permission: reading a window's position needs
+                # Accessibility for the app the bridge runs in (-25211), listing
+                # processes needs Automation for System Events (-1743).
+                msg = str(e)
+                if "-25211" in msg or "assistive access" in msg:
+                    msg = ("macOS blocks reading the game window's position: allow the app the bridge runs in "
+                           "(Terminal, iTerm, ...) under System Settings > Privacy & Security > Accessibility, "
+                           "then restart it")
+                elif "-1743" in msg or "not authorized" in msg.lower():
+                    msg = ("macOS blocks System Events: allow the app the bridge runs in under System Settings > "
+                           "Privacy & Security > Automation > System Events, then restart it")
+                emit({"error": "window lookup failed: " + msg})
+                bounds = None
+                time.sleep(10)
+                continue
             bounds_at = start
         if not bounds:
             emit({"info": "waiting for %s window" % (args.window_name or args.process_name)})
