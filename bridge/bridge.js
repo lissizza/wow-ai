@@ -359,6 +359,24 @@ function beat(job) {
   try { atomicWrite(actFile(job.id, job.beats), SILENT_WAV); } catch {}
 }
 
+// Steps: step/NNN/kk.wav flips valid when the agent finishes the k-th item of
+// its plan while working on message NNN. The game polls the next one for free
+// and only then spends a slot to read the step's text (the working record
+// carries every step so far), so a finished step reaches the game chat within
+// a couple of seconds instead of waiting for the reply.
+const STEP_MAX = cfg.stepMax || 30;
+function stepFile(id, k) {
+  return path.join(cfg.addonDir, 'WoWAI', 'step', pad3(slotNumber(id)), String(k).padStart(2, '0') + '.wav');
+}
+function resetSteps(id) {
+  if (!fs.existsSync(path.join(cfg.addonDir, 'WoWAI', 'step'))) return;
+  for (let k = 1; k <= STEP_MAX; k++) { try { atomicWrite(stepFile(id, k), Buffer.alloc(0)); } catch {} }
+}
+function raiseStep(job, k) {
+  if (k > STEP_MAX || !fs.existsSync(path.join(cfg.addonDir, 'WoWAI', 'step'))) return;
+  try { atomicWrite(stepFile(job.id, k), SILENT_WAV); } catch {}
+}
+
 // Presence: every 30 s flip the next presence/NNNN.wav valid so the game can tell
 // the bridge is alive without spending a slot. The counter persists across
 // restarts so a filename is never reused while the game is still running; the
@@ -500,6 +518,7 @@ function runJob(job) {
   const tag = `#${job.id}${job.session ? '@' + job.session : ''}`;
   signal('sig', job.id, false);
   resetBeats(job.id);
+  resetSteps(job.id);
   signal('ack', job.id, true);
   if (!fs.existsSync(cwd)) {
     log(`${tag} cwd does not exist: ${cwd}`);
@@ -549,7 +568,9 @@ function runJob(job) {
   noteMessage(job, 'user', job.text);
   const resume = state.sessions[skey] || state.sessions[key];
 
-  const ctx = gameContext();
+  // A development chat gets only the reply-format rule: no game context, no
+  // addon primer, no map/macro hints (a few thousand tokens per run saved).
+  const ctx = job.dev ? '' : gameContext();
   const system = P.systemPrompt(ctx, primer());
   const systemShort = P.systemPrompt(ctx, '');
   const promptFile = path.join(TMP_DIR, `prompt-${job.id}-${Date.now().toString(36)}.txt`);
@@ -570,7 +591,7 @@ function runJob(job) {
     env.WOW_AI_MAP_FILE = mapFileFor(job);
   } catch (e) { log(`${tag} map file unavailable: ${e.message}`); }
 
-  log(`${tag} (${job.via}) ${agent.name} starting in ${cwd}${resume ? ' (resume ' + resume.slice(0, 8) + ')' : ' (new session)'}${ctx ? ' [game context]' : ''}${running.size ? ' [' + (running.size + 1) + ' running]' : ''}`);
+  log(`${tag} (${job.via}) ${agent.name} starting in ${cwd}${resume ? ' (resume ' + resume.slice(0, 8) + ')' : ' (new session)'}${ctx ? ' [game context]' : ''}${job.dev ? ' [dev]' : ''}${running.size ? ' [' + (running.size + 1) + ' running]' : ''}`);
   const child = spawn(cmd.file, args, { cwd, env, windowsHide: true, stdio: [input.stdin !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
   running.set(key, { job, child });
   publish(key, { chat: job.chat, id: job.id, status: 'working', text: resume ? 'thinking...' : 'starting a new session...', cwd, session: resume, agent: agentId }, true);
@@ -587,11 +608,21 @@ function runJob(job) {
   let stdoutText = '';
   let parserError = false;
 
+  const steps = [];         // plan items finished so far, in order
+  const working = () => ({ chat: job.chat, id: job.id, status: 'working', text: progress.join('\n'), cwd, session: sessionId, agent: agentId, steps: [...steps] });
   const pushProgress = (line) => {
     progress.push(line);
     while (progress.length > 10) progress.shift();
     beat(job);
-    publish(key, { chat: job.chat, id: job.id, status: 'working', text: progress.join('\n'), cwd, session: sessionId, agent: agentId }, false);
+    publish(key, working(), false);
+  };
+  // A finished step is published at once (the game is about to load a slot for
+  // it), then its signal is raised.
+  const pushStep = (text) => {
+    steps.push(String(text).slice(0, 200));
+    log(`${tag} step ${steps.length}: ${steps[steps.length - 1]}`);
+    publish(key, working(), true);
+    raiseStep(job, steps.length);
   };
   if (agent.stream === 'text') pushProgress(`${agent.name} is working (no live progress)`);
   if (input.note) notes.push(input.note);
@@ -619,6 +650,7 @@ function runJob(job) {
     }
     if (r.session) sessionId = r.session;
     for (const p of r.progress) pushProgress(p);
+    for (const st of Array.isArray(r.steps) ? r.steps : []) pushStep(st);
     for (const d of r.denied) denied.add(d);
     notes.push(...r.notes);
     if (r.done) result = r.done;

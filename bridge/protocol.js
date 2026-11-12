@@ -115,12 +115,13 @@ function sameFolder(a, b) {
 // empty one clears the context the bridge keeps), "agent=codex" = run this
 // chat with that agent instead of the bridge's default (see agents.js).
 function parseFlags(flags) {
-  const out = { newSession: false, hello: false, forget: false, context: false, allow: [], agent: '' };
+  const out = { newSession: false, hello: false, forget: false, context: false, dev: false, allow: [], agent: '' };
   for (const tok of String(flags || '').split(';')) {
     if (tok === 'n') out.newSession = true;
     else if (tok === 'h') out.hello = true;
     else if (tok === 'd') out.forget = true;
     else if (tok === 'c') out.context = true;
+    else if (tok === 'dev') out.dev = true; // a development chat: no game context, primer or map/macro hints
     else if (tok.startsWith('allow=')) out.allow.push(...tok.slice(6).split(',').map(s => s.trim()).filter(Boolean));
     else if (tok.startsWith('agent=')) out.agent = tok.slice(6).trim().toLowerCase();
   }
@@ -164,7 +165,8 @@ function parseOutbox(src) {
   const session = (b.match(/\["session"\]\s*=\s*"([0-9a-zA-Z]*)"/) || [])[1] || '';
   const chat = (b.match(/\["chat"\]\s*=\s*"([0-9a-zA-Z]*)"/) || [])[1] || '';
   const newSession = /\["newSession"\]\s*=\s*true/.test(b);
-  const job = { id, session, chat, text, cwd, newSession, via: 'reload' };
+  const dev = /\["dev"\]\s*=\s*true/.test(b);
+  const job = { id, session, chat, text, cwd, newSession, dev, via: 'reload' };
   const ctx = b.match(/\["ctx"\]\s*=\s*"([0-9a-fA-F]*)"/);
   if (ctx) job.ctx = fromHex(ctx[1]);
   const agent = b.match(/\["agent"\]\s*=\s*"([0-9a-zA-Z_-]*)"/);
@@ -184,7 +186,8 @@ function parseOutbox(src) {
 // addon has sent a context (the player's character, location and so on; see
 // GameContext in WoWAI.lua), that context plus the addon/macro primer
 // (docs/WOW-ADDON-PRIMER.md) so it can write for this client whatever folder
-// the chat works in. Empty context = neither is appended, so a bridge used for
+// the chat works in. A development chat (the `dev` flag) is run with an empty
+// context. Empty context = neither is appended, so a bridge used for
 // unrelated projects, or an addon with `/wow-ai context off`, only gets the
 // reply-format rule. Claude and Grok take this as a system prompt; for Codex,
 // agents.js puts it at the top of the prompt.
@@ -330,6 +333,9 @@ function luaTable(globalName, records, opts = {}) {
       lines.push(`\t\t\tdenied = { ${r.denied.map(luaStr).join(', ')} },`);
     }
     if (Array.isArray(r.macros) && r.macros.length) lines.push(luaMacros(r.macros));
+    if (Array.isArray(r.steps) && r.steps.length) {
+      lines.push(`\t\t\tsteps = { ${r.steps.map(luaStr).join(', ')} },`);
+    }
     lines.push('\t\t},');
   }
   lines.push('\t},');

@@ -361,3 +361,42 @@ test('resolveCommand: a configured script runs with this node, an npm .cmd shim 
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// Steps: finished plan items
+// ---------------------------------------------------------------------------
+
+const todo = (todos, extra = {}) => ({ type: 'assistant', ...extra, message: { content: [{ type: 'tool_use', name: 'TodoWrite', input: { todos } }] } });
+
+test('claude: each TodoWrite item is reported once, when it turns completed', () => {
+  const p = A.claudeParser();
+  assert.deepEqual(p.feed(todo([{ content: 'Read config', status: 'in_progress' }, { content: 'Add flag', status: 'pending' }])).steps, []);
+  assert.deepEqual(p.feed(todo([{ content: 'Read config', status: 'completed' }, { content: 'Add flag', status: 'in_progress' }])).steps, ['Read config']);
+  // The whole list again: the old item is not repeated, the new one is.
+  assert.deepEqual(p.feed(todo([{ content: 'Read config', status: 'completed' }, { content: 'Add flag', status: 'completed' }])).steps, ['Add flag']);
+  assert.deepEqual(p.feed(todo([{ content: 'Read config', status: 'completed' }, { content: 'Add flag', status: 'completed' }])).steps, []);
+});
+
+test('claude: TaskCreate/TaskUpdate steps are matched back to their subject', () => {
+  const p = A.claudeParser();
+  const call = (name, input) => p.feed({ type: 'assistant', message: { content: [{ type: 'tool_use', name, input }] } }).steps;
+  assert.deepEqual(call('TaskCreate', { subject: 'Write tests' }), []);
+  assert.deepEqual(call('TaskCreate', { subject: 'Ship it' }), []);
+  assert.deepEqual(call('TaskUpdate', { taskId: '2', status: 'in_progress' }), []);
+  assert.deepEqual(call('TaskUpdate', { taskId: '2', status: 'completed' }), ['Ship it']);
+  assert.deepEqual(call('TaskUpdate', { taskId: '2', status: 'completed' }), [], 'only once');
+  assert.deepEqual(call('TaskUpdate', { taskId: '7', status: 'completed' }), ['task 7']);
+});
+
+test('claude: a subagent\'s plan is not announced as the main agent\'s steps', () => {
+  const p = A.claudeParser();
+  assert.deepEqual(p.feed(todo([{ content: 'inner', status: 'completed' }], { parent_tool_use_id: 'toolu_1' })).steps, []);
+});
+
+test('codex: todo_list items are reported once as they get completed', () => {
+  const p = A.codexParser();
+  const ev = (type, items) => ({ type, item: { id: 't', type: 'todo_list', items } });
+  assert.deepEqual(p.feed(ev('item.started', [{ text: 'a', completed: false }, { text: 'b', completed: false }])).steps, []);
+  assert.deepEqual(p.feed(ev('item.updated', [{ text: 'a', completed: true }, { text: 'b', completed: false }])).steps, ['a']);
+  assert.deepEqual(p.feed(ev('item.completed', [{ text: 'a', completed: true }, { text: 'b', completed: true }])).steps, ['b']);
+});

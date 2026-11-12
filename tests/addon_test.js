@@ -86,8 +86,11 @@ function nextSlot(vm, luaBody) {
   vm.run(`STUB.onLoadAddOn = function(name) WoWAI_SlotData = ${luaBody} end`);
 }
 
-function login(vm) {
+// Most tests drive game chats (context, map, macros), the behaviour the addon
+// had before development chats; { dev: true } keeps the fork's default instead.
+function login(vm, opts = {}) {
   vm.run('STUB.FireEvent("ADDON_LOADED", "WoWAI")');
+  if (!opts.dev) vm.run('WoWAIDB.settings.gameDefault = true');
   vm.run('STUB.FireEvent("PLAYER_LOGIN")');
 }
 
@@ -714,4 +717,99 @@ test('reload mode writes the outbox for the bridge instead of drawing the strip'
   assert.equal(vm.evaluate('WoWAIDB.outbox.text'), Buffer.from('via reload').toString('hex'));
   assert.equal(Buffer.from(vm.evaluate('WoWAIDB.outbox.allow'), 'hex').toString('utf8'), 'WebSearch\x1fBash(git:*)');
   assert.equal(decodeStrip(vm), null);
+});
+
+// ---------------------------------------------------------------------------
+// Development chats and step announcements
+// ---------------------------------------------------------------------------
+
+test('a development chat (the default) sends "dev" and no game context; /wow-ai game switches it', () => {
+  const vm = newVM();
+  login(vm, { dev: true });
+  connect(vm);
+  assert.equal(vm.evaluate('WoWAIDB.settings.gameDefault'), 'false');
+  vm.run('WoWAI.Send("refactor the parser")');
+  let rec = stripRecords(vm).find(r => r.text === 'refactor the parser');
+  assert.ok(rec, 'message on the strip');
+  assert.equal(rec.flags, 'dev');
+  assert.equal(rec.ctx, undefined, 'no context rides along');
+  assert.equal(vm.evaluate('WoWAIDB.outbox.dev'), 'true', 'the reload fallback says so too');
+
+  // Switch this chat to a game chat: no dev flag any more.
+  vm.run('WoWAIDB.chats[1].pendingId = nil');
+  vm.run('SlashCmdList.WOWAI("game on")');
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].game'), 'true');
+  vm.run('WoWAI.Send("what should I craft")');
+  rec = stripRecords(vm).find(r => r.text === 'what should I craft');
+  assert.ok(rec);
+  assert.ok(!rec.flags.split(';').includes('dev'));
+  assert.equal(vm.evaluate('WoWAIDB.outbox.dev'), null);
+
+  // "game default on" flips chats that never picked, not this one.
+  vm.run('SlashCmdList.WOWAI("game off")');
+  vm.run('SlashCmdList.WOWAI("game default on")');
+  assert.equal(vm.evaluate('WoWAIDB.settings.gameDefault'), 'true');
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].game'), 'false');
+  // "/ai game of thrones recap" is a message, not a command.
+  vm.run('WoWAIDB.chats[1].pendingId = nil');
+  vm.run('SlashCmdList.WOWAI("game of thrones recap")');
+  assert.ok(stripRecords(vm).find(r => r.text === 'game of thrones recap'));
+});
+
+test('a finished step is signalled, read from a slot and announced in the game chat once', () => {
+  const vm = newVM();
+  vm.run('STUB.sounds["Interface\\\\AddOns\\\\WoWAI\\\\ctl\\\\valid.wav"] = true');
+  login(vm, { dev: true });
+  connect(vm);
+  vm.run('WoWAI.Send("add the flag")');
+  const chatId = vm.evaluate('WoWAIDB.chats[1].id');
+  const id = vm.num('WoWAIDB.chats[1].pendingId');
+  const slot = String(((id - 1) % 200) + 1).padStart(3, '0');
+  const stepFile = k => `STUB.sounds["Interface\\\\AddOns\\\\WoWAI\\\\step\\\\${slot}\\\\0${k}.wav"] = true`;
+  const working = steps => `{ now = time(), cwd = "", replies = { { chat = "${chatId}", id = ${id}, status = "working", text = "edit a.lua", steps = { ${steps.map(t => `"${t}"`).join(', ')} } } } }`;
+  const prints = () => vm.evaluate('table.concat(STUB.prints, "\\n")');
+
+  // Step 1 is raised: the addon loads a slot right away, before any schedule.
+  vm.run('STUB.prints = {}');
+  nextSlot(vm, working(['Read the config']));
+  vm.run(`${stepFile(1)}; STUB.now = STUB.now + 2; STUB.Tick()`);
+  assert.match(prints(), /step 1 done:.*Read the config/);
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].stepsShown'), '1');
+
+  // A later slot repeats step 1 next to step 2: only step 2 is printed.
+  vm.run('STUB.prints = {}');
+  nextSlot(vm, working(['Read the config', 'Add the flag']));
+  vm.run(`${stepFile(2)}; STUB.now = STUB.now + 2; STUB.Tick()`);
+  assert.doesNotMatch(prints(), /Read the config/);
+  assert.match(prints(), /step 2 done:.*Add the flag/);
+
+  // No new step file: nothing is announced again.
+  vm.run('STUB.prints = {}; STUB.now = STUB.now + 1; STUB.Tick()');
+  assert.doesNotMatch(prints(), /step/);
+
+  // The reply finishes the chat and resets the step count.
+  nextSlot(vm, `{ now = time(), cwd = "", replies = { { chat = "${chatId}", id = ${id}, status = "done", text = "done", summary = "flag added" } } }`);
+  vm.run(`STUB.sounds["Interface\\\\AddOns\\\\WoWAI\\\\sig\\\\${slot}.wav"] = true; STUB.now = STUB.now + 2; STUB.Tick()`);
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].pendingId'), null);
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].stepsShown'), null);
+});
+
+test('/wow-ai steps off stops step announcements', () => {
+  const vm = newVM();
+  vm.run('STUB.sounds["Interface\\\\AddOns\\\\WoWAI\\\\ctl\\\\valid.wav"] = true');
+  login(vm, { dev: true });
+  connect(vm);
+  vm.run('SlashCmdList.WOWAI("steps off")');
+  assert.equal(vm.evaluate('WoWAIDB.settings.steps'), 'false');
+  vm.run('WoWAI.Send("x")');
+  const chatId = vm.evaluate('WoWAIDB.chats[1].id');
+  const id = vm.num('WoWAIDB.chats[1].pendingId');
+  const slot = String(((id - 1) % 200) + 1).padStart(3, '0');
+  vm.run('STUB.prints = {}');
+  vm.run(`STUB.onLoadAddOn = function() error("no slot should be loaded for a step") end`);
+  vm.run(`STUB.sounds["Interface\\\\AddOns\\\\WoWAI\\\\step\\\\${slot}\\\\01.wav"] = true; STUB.now = STUB.now + 2; STUB.Tick()`);
+  // A slot loaded for another reason still carries steps: they stay quiet.
+  nextSlot(vm, `{ now = time(), cwd = "", replies = { { chat = "${chatId}", id = ${id}, status = "working", text = "", steps = { "quiet" } } } }`);
+  vm.run('STUB.now = STUB.now + 6; STUB.Tick()');
+  assert.doesNotMatch(vm.evaluate('table.concat(STUB.prints, "\\n")'), /quiet/);
 });

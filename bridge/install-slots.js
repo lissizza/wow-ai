@@ -11,6 +11,7 @@ const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf
 const addons = cfg.addonDir;
 const N = cfg.slots || 200;
 const ACT = cfg.actMax || 60;
+const STEPS = cfg.stepMax || 30;
 const PRESENCE = cfg.presenceMax || 2000;
 const iface = cfg.tocInterface || '16001';
 
@@ -46,6 +47,10 @@ for (let i = 1; i <= N; i++) {
   // Heartbeat files: one per agent action, flipped valid by the bridge as it works.
   for (let k = 1; k <= ACT; k++) {
     ensure(path.join(addons, 'WoWAI', 'act', String(i).padStart(3, '0'), String(k).padStart(2, '0') + '.wav'), '');
+  }
+  // Step files: one per finished plan item, so the game hears about each step.
+  for (let k = 1; k <= STEPS; k++) {
+    ensure(path.join(addons, 'WoWAI', 'step', String(i).padStart(3, '0'), String(k).padStart(2, '0') + '.wav'), '');
   }
 }
 

@@ -4,6 +4,11 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ## [Unreleased]
 
+### Added
+
+- Development chats. A chat is now either a **game chat** (the character/zone context, the addon/macro primer and the map/macro hints go into the agent's system prompt, as before) or a **development chat** (none of that: only the reply-format rule, a few thousand tokens less per run). New chats are development chats; `/wow-ai game on|off` switches the current chat, `/wow-ai game default on|off` sets what chats that never picked use. Game chats are marked `game` in the chat list. The strip record carries a `dev` flag (and the reload outbox `dev = true`); the bridge skips the context for such a run and logs `[dev]`.
+- Step announcements. When the agent ticks off an item of its plan (Claude Code's `TodoWrite`, or `TaskCreate`/`TaskUpdate`; Codex's `todo_list`), the game chat gets `[Claude · chat] step N done: <item>` with a soft sound, while the agent keeps working. The bridge publishes the working record with every finished step so far (`steps` in the slot file) and flips `step/NNN/kk.wav`; the addon polls the next file for free and spends one slot to read the text. Subagents' plans are not announced. `/wow-ai steps on|off` (default on); `stepMax` in `config.json` (default 30). **Re-run `node setup.js` (or `npm run slots`) and restart WoW** so the client indexes the new `step/` files; without them steps still arrive with the scheduled slot polls, just later.
+
 ## [0.5.0] - 2026-11-04
 
 ### Added

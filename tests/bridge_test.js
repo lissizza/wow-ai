@@ -13,7 +13,7 @@ test('luaStr escapes everything Lua 5.1 needs', () => {
 });
 
 test('parseFlags reads new-session, hello, forget, context, agent and allow lists', () => {
-  const none = { newSession: false, hello: false, forget: false, context: false, allow: [], agent: '' };
+  const none = { newSession: false, hello: false, forget: false, context: false, dev: false, allow: [], agent: '' };
   assert.deepEqual(P.parseFlags(''), none);
   assert.deepEqual(P.parseFlags('n'), { ...none, newSession: true });
   assert.deepEqual(P.parseFlags('h'), { ...none, hello: true });
@@ -22,13 +22,14 @@ test('parseFlags reads new-session, hello, forget, context, agent and allow list
   assert.deepEqual(P.parseFlags('n;allow=WebSearch, Bash(git:*),'), { ...none, newSession: true, allow: ['WebSearch', 'Bash(git:*)'] });
   assert.deepEqual(P.parseFlags('agent=Codex'), { ...none, agent: 'codex' });
   assert.deepEqual(P.parseFlags('n;agent=grok;allow=WebSearch'), { ...none, newSession: true, agent: 'grok', allow: ['WebSearch'] });
+  assert.deepEqual(P.parseFlags('agent=codex;dev'), { ...none, agent: 'codex', dev: true }, 'a development chat says so');
 });
 
 test('jobsFromStrip parses the current record format and keeps separators inside text', () => {
   const rec = ['sess', 'chat1', '12', 'realms', 'allow=WebSearch', 'My chat', 'hello\x1Fworld'].join('\x1F');
   const jobs = P.jobsFromStrip(12, rec);
   assert.equal(jobs.length, 1);
-  assert.deepEqual(jobs[0], { session: 'sess', chat: 'chat1', id: 12, cwd: 'realms', newSession: false, hello: false, forget: false, context: false, allow: ['WebSearch'], agent: '', name: 'My chat', text: 'hello\x1Fworld', via: 'pixel' });
+  assert.deepEqual(jobs[0], { session: 'sess', chat: 'chat1', id: 12, cwd: 'realms', newSession: false, hello: false, forget: false, context: false, dev: false, allow: ['WebSearch'], agent: '', name: 'My chat', text: 'hello\x1Fworld', via: 'pixel' });
   // A chat that picked its own agent says so in the flags.
   const codex = P.jobsFromStrip(13, ['sess', 'chat1', '13', '', 'agent=codex', 'My chat', 'hi'].join('\x1F'))[0];
   assert.equal(codex.agent, 'codex');
@@ -120,7 +121,9 @@ test('jobsFromStrip handles several records per frame and older formats', () => 
 test('parseOutbox decodes the SavedVariables fallback', () => {
   const hex = s => Buffer.from(s, 'utf8').toString('hex');
   const src = `WoWAIDB = {\n["outbox"] = {\n["id"] = 7,\n["session"] = "abc123",\n["chat"] = "c1",\n["text"] = "${hex('héllo')}",\n["cwd"] = "${hex('realms')}",\n["newSession"] = true,\n},\n["settings"] = {},\n}`;
-  assert.deepEqual(P.parseOutbox(src), { id: 7, session: 'abc123', chat: 'c1', text: 'héllo', cwd: 'realms', newSession: true, via: 'reload' });
+  assert.deepEqual(P.parseOutbox(src), { id: 7, session: 'abc123', chat: 'c1', text: 'héllo', cwd: 'realms', newSession: true, dev: false, via: 'reload' });
+  const dev = src.replace('["newSession"]', '["dev"] = true,\n["newSession"]');
+  assert.equal(P.parseOutbox(dev).dev, true, 'the reload path keeps a development chat a development chat');
   const withAllow = src.replace('["newSession"]', `["allow"] = "${hex('WebSearch\x1fBash(git:*)')}",\n["newSession"]`);
   assert.deepEqual(P.parseOutbox(withAllow).allow, ['WebSearch', 'Bash(git:*)']);
   const withCtx = src.replace('["newSession"]', `["ctx"] = "${hex('Character: Testchar')}",\n["newSession"]`);
@@ -195,4 +198,10 @@ test('slotNumber wraps and SILENT_WAV is a valid RIFF header', () => {
   assert.equal(P.chatKey({ session: 's', chat: 'c' }), 's:c');
   assert.equal(P.sessKey({ session: 's', chat: 'c' }), 'chat:c');
   assert.equal(P.sessKey({ session: 's', chat: '' }), 's:default');
+});
+
+test('luaTable carries the steps a working record has finished so far', () => {
+  const body = P.luaTable('WoWAI_SlotData', [{ chat: 'c1', id: 3, status: 'working', text: 'edit a.lua', steps: ['Read the code', 'Fix "quotes"'] }]);
+  assert.match(body, /steps = \{ "Read the code", "Fix \\"quotes\\"" \},/);
+  assert.doesNotMatch(P.luaTable('X', [{ chat: 'c1', id: 3, status: 'working', text: '' }]), /steps/);
 });

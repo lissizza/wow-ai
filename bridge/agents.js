@@ -40,8 +40,63 @@ function shellInner(cmd) {
 // A fresh accumulator for one parsed line. progress: lines for the working
 // bubble; session: the agent's session id, for the next run's resume; denied:
 // allowlist rules (Claude syntax) the run was refused; notes: text the bridge
-// appends to the reply; done: the reply itself, once the run has produced it.
-function empty() { return { progress: [], denied: [], notes: [] }; }
+// appends to the reply; steps: plan items the agent just marked completed
+// (announced in the game chat as they happen); done: the reply itself, once
+// the run has produced it.
+function empty() { return { progress: [], denied: [], notes: [], steps: [] }; }
+
+// ---------------------------------------------------------------------------
+// Steps: plan items finished during a run
+// ---------------------------------------------------------------------------
+
+// Agents keep a plan as a todo list and tick items off as they go. A tracker
+// remembers which items it has already seen completed, so each finished step
+// is reported exactly once however often the agent rewrites the whole list.
+// update() takes the full current list as [{ key, text, done }] and returns the
+// texts that became done since the last call.
+function stepTracker() {
+  const done = new Set();
+  return {
+    update(items) {
+      const fresh = [];
+      for (const it of items || []) {
+        const text = firstLine(it && it.text).trim();
+        if (!it || !it.done || !text) continue;
+        const key = String(it.key || text);
+        if (done.has(key)) continue;
+        done.add(key);
+        fresh.push(text);
+      }
+      return fresh;
+    },
+  };
+}
+
+// Claude Code's plan tools: TodoWrite rewrites the whole list
+// ({ todos: [{ content, status }] }); newer versions create tasks one by one
+// (TaskCreate { subject }) and tick them off with TaskUpdate { taskId, status }.
+// Task ids are handed out in creation order starting at 1, which is how a
+// TaskUpdate that doesn't repeat the subject is matched back to its text.
+function claudeSteps() {
+  const tracker = stepTracker();
+  const tasks = [];
+  return (block) => {
+    const inp = block.input || {};
+    if (block.name === 'TodoWrite' && Array.isArray(inp.todos)) {
+      return tracker.update(inp.todos.map(t => ({ key: t.content, text: t.content, done: t.status === 'completed' })));
+    }
+    if (block.name === 'TaskCreate' && inp.subject) {
+      tasks.push(String(inp.subject));
+      return [];
+    }
+    if (block.name === 'TaskUpdate' && inp.status === 'completed') {
+      const id = String(inp.taskId ?? '');
+      const text = inp.subject || tasks[Number(id) - 1] || `task ${id}`;
+      return tracker.update([{ key: 'task:' + id, text, done: true }]);
+    }
+    return [];
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Permission rules
@@ -61,12 +116,15 @@ function grokRules(rule) {
 // ---------------------------------------------------------------------------
 
 function claudeParser() {
+  const steps = claudeSteps();
   return {
     feed(ev) {
       const out = empty();
       if (ev.session_id) out.session = ev.session_id;
+      // Subagents' events carry a parent_tool_use_id; their plans are their own.
       if (ev.type === 'assistant' && ev.message && Array.isArray(ev.message.content)) {
         for (const block of ev.message.content) {
+          if (block.type === 'tool_use' && !ev.parent_tool_use_id) out.steps.push(...steps(block));
           if (block.type === 'tool_use') out.progress.push(describeToolUse(block));
           else if (block.type === 'text' && block.text && block.text.trim()) out.progress.push(snippet(block.text));
         }
@@ -109,10 +167,16 @@ function codexItemLine(item) {
 function codexParser() {
   let last = null; // the newest agent_message: Codex's final answer is the last one of the turn
   const shown = new Set(); // item ids already announced when they started
+  const steps = stepTracker();
   return {
     feed(ev) {
       const out = empty();
       const item = ev.item;
+      // Codex's plan: a todo_list item, re-sent whole as entries get ticked off.
+      if (item && item.type === 'todo_list' && Array.isArray(item.items)) {
+        out.steps.push(...steps.update(item.items.map(t => ({ key: t.text, text: t.text, done: !!t.completed }))));
+        return out;
+      }
       if (ev.type === 'thread.started') {
         if (ev.thread_id) out.session = ev.thread_id;
       } else if (ev.type === 'item.started' && item) {
@@ -599,7 +663,7 @@ function resolveCommand(id, cfg = {}) {
 
 module.exports = {
   AGENTS, DEFAULT_AGENT, agentIds, normalizeAgent, displayName, agentConfig,
-  grokRules, snippet, contextBlock,
+  grokRules, snippet, contextBlock, stepTracker,
   claudeParser, codexParser, grokParser, agyParser, hermesParser, codexItemLine, grokCall, grokRefusal, shellInner,
   resolveCommand, unwrapShim, nativeNextTo,
 };

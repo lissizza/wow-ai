@@ -6,6 +6,7 @@
   "tocInterface": "16001",
   "slots": 200,
   "actMax": 60,
+  "stepMax": 30,
   "presenceMax": 2000,
   "presenceIntervalMs": 30000,
   "maxParallel": 3,

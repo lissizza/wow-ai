@@ -28,6 +28,7 @@ local MAX_CHATS = 16
 local SLOT_COUNT = 200
 local SLOT_PREFIX = "WoWAI_S"
 local ACT_MAX = 60 -- heartbeat files per message (act/NNN/01..60.wav)
+local STEP_MAX = 30 -- finished-step files per message (step/NNN/01..30.wav)
 local PRESENCE_MAX = 2000 -- presence/0001..2000.wav, one flipped by the bridge every 30 s
 local STRIP_TRIES = 3 -- re-show an unacknowledged message this many times before falling back
 local CELL, CELLS_PER_ROW, MAX_ROWS = 4, 200, 48
@@ -126,6 +127,23 @@ local function ChatAgentName(c)
 end
 
 -- The name to show on a reply: the agent the bridge says wrote it, else the chat's.
+-- A game chat sends the character/zone context and gets the addon primer and
+-- the map/macro hints; a development chat gets none of that. Chats that never
+-- picked follow /wow-ai game default.
+local function IsGameChat(c)
+	if c.game ~= nil then return c.game end
+	return db.settings.gameDefault and true or false
+end
+
+-- The strip flags every prompt record of a chat carries.
+local function ChatFlags(c, newSession)
+	local tokens = {}
+	if newSession then table.insert(tokens, "n") end
+	if c.agent and c.agent ~= "" then table.insert(tokens, "agent=" .. c.agent) end
+	if not IsGameChat(c) then table.insert(tokens, "dev") end
+	return tokens
+end
+
 local function ReplyAgentName(c, agent)
 	if agent and agent ~= "" then return AgentName(agent) end
 	return ChatAgentName(c)
@@ -199,6 +217,10 @@ local function InitDB()
 	if s.autoRefresh == nil then s.autoRefresh = true end
 	if s.signal == nil then s.signal = true end
 	if s.context == nil then s.context = true end -- tell the agent about the character, zone, etc.
+	-- New chats are development chats unless this is turned on: no game context,
+	-- addon primer or map/macro hints in the agent's system prompt.
+	if s.gameDefault == nil then s.gameDefault = false end
+	if s.steps == nil then s.steps = true end -- announce each finished plan step in the game chat
 	-- How much of each reply to print in the game chat. "summary" (the agent's
 	-- closing TL;DR lines) replaced "full" as the default; an install that still
 	-- has the old default saved moves over once, any other choice is kept.
@@ -439,13 +461,32 @@ local function ActPath(id, k)
 	return string.format("Interface\\AddOns\\WoWAI\\act\\%03d\\%02d.wav", SlotNumber(id), k)
 end
 
+-- Finished steps: the bridge flips step/NNN/kk.wav when the agent ticks off the
+-- k-th item of its plan; the step's text comes with the next slot.
+local function StepPath(id, k)
+	return string.format("Interface\\AddOns\\WoWAI\\step\\%03d\\%02d.wav", SlotNumber(id), k)
+end
+
 local function StartActivity(chat, id)
-	local a = { next = 1, count = 0, startedAt = GetTime() }
+	local a = { next = 1, count = 0, startedAt = GetTime(), stepNext = 1 }
 	-- The bridge can't have written anything yet, so a valid first file means the
 	-- client cached this slot number's files from an earlier use: don't trust them.
 	if SoundValid(ActPath(id, 1)) then a.unreliable = true end
+	if SoundValid(StepPath(id, 1)) then a.stepsUnreliable = true end
 	run.act = run.act or {}
 	run.act[chat.id] = a
+end
+
+-- Returns true if the agent finished another step since the last look.
+local function PollSteps(chat)
+	local a = run.act and run.act[chat.id]
+	if not a or a.stepsUnreliable or not chat.pendingId or not db.settings.steps then return false end
+	local moved = false
+	while a.stepNext <= STEP_MAX and SoundValid(StepPath(chat.pendingId, a.stepNext)) do
+		a.stepNext = a.stepNext + 1
+		moved = true
+	end
+	return moved
 end
 
 -- Returns true if the counter moved.
@@ -715,6 +756,13 @@ local function ApplyReplies(replies)
 				Finish(c, "system", "Bridge error: " .. tostring(r.text), denied)
 			elseif r.status == "working" then
 				c.progress = r.text
+				if type(r.steps) == "table" and db.settings.steps then
+					c.stepsShown = c.stepsShown or 0
+					for i = c.stepsShown + 1, #r.steps do
+						WoWAI.NotifyStep(c, i, tostring(r.steps[i]), r.agent)
+					end
+					c.stepsShown = math.max(c.stepsShown, #r.steps)
+				end
 			end
 		end
 	end
@@ -882,6 +930,12 @@ local function Tick()
 	end
 	if moved then WoWAI.Render() end
 	for _, c in ipairs(db.chats) do
+		if c.pendingId and PollSteps(c) then
+			TryLoadSlot("step")
+			return
+		end
+	end
+	for _, c in ipairs(db.chats) do
 		if c.pendingId and CheckSignal("sig", c.pendingId) then
 			TryLoadSlot("signal")
 			return
@@ -908,6 +962,7 @@ Finish = function(chat, role, text, denied, agent, summary, macros)
 	AddHistory(chat, role, text, chat.pendingId, denied, agent, macros)
 	chat.pendingId = nil
 	chat.progress = nil
+	chat.stepsShown = nil
 	if run.act then run.act[chat.id] = nil end
 	NotedBridge()
 	local visible = ui.frame and ui.frame:IsShown() and db.activeChat == chat.id
@@ -1223,14 +1278,14 @@ function WoWAI.Send(text, allow)
 		WoWAI.Render()
 		return
 	end
-	-- The game context rides along when the bridge doesn't have this version yet.
-	local ctx = ContextToSend(limit - #text)
+	-- The game context rides along when the bridge doesn't have this version yet;
+	-- a development chat never needs it.
+	local game = IsGameChat(c)
+	local ctx = game and ContextToSend(limit - #text) or nil
 
 	db.lastSeq = db.lastSeq + 1
 	local id = db.lastSeq
-	local tokens = {}
-	if c.resetNext then table.insert(tokens, "n") end
-	if c.agent and c.agent ~= "" then table.insert(tokens, "agent=" .. c.agent) end
+	local tokens = ChatFlags(c, c.resetNext)
 	local allowHex
 	if type(allow) == "table" and #allow > 0 then
 		table.insert(tokens, "allow=" .. table.concat(allow, ","))
@@ -1247,6 +1302,7 @@ function WoWAI.Send(text, allow)
 		cwd = ToHex(c.cwd),
 		ctx = ctx and ToHex(ctx) or nil,
 		agent = (c.agent and c.agent ~= "") and c.agent or nil,
+		dev = (not game) or nil,
 		allow = allowHex,
 		newSession = newSession,
 		t = time(),
@@ -1254,6 +1310,7 @@ function WoWAI.Send(text, allow)
 	c.pendingId = id
 	c.draft = nil
 	c.progress = nil
+	c.stepsShown = 0
 	AddHistory(c, "user", text, id)
 	-- A chat still carrying its default name takes its title from the first message
 	-- you send (system notes like "/wow-ai cd" before it don't count).
@@ -1341,7 +1398,7 @@ function WoWAI.Resend()
 		end
 	end
 	if not text then return end
-	run.outbound[c.pendingId] = { chat = c.id, cwd = c.cwd, flags = (c.agent and c.agent ~= "") and ("agent=" .. c.agent) or "", name = c.name, text = text, sentAt = GetTime() }
+	run.outbound[c.pendingId] = { chat = c.id, cwd = c.cwd, flags = table.concat(ChatFlags(c), ";"), name = c.name, text = text, sentAt = GetTime() }
 	run.sentAt = GetTime()
 	run.polls = 0
 	ScheduleNextPoll()
@@ -2060,6 +2117,9 @@ function WoWAI.RenderChatList()
 			if c.agent and c.agent ~= "" then
 				label = label .. " |cff888888" .. AgentName(c.agent) .. "|r"
 			end
+			if IsGameChat(c) then
+				label = label .. " |cffd4a017game|r"
+			end
 			if c.pendingId then
 				label = label .. " |cffffd100...|r"
 			elseif (c.unread or 0) > 0 then
@@ -2175,6 +2235,18 @@ function WoWAI.Notify(chat, text, agent, summary)
 	if ui.frame and ui.frame:IsShown() and db.activeChat == chat.id then return end
 	if UIErrorsFrame then
 		UIErrorsFrame:AddMessage(ReplyAgentName(chat, agent) .. " replied in " .. Display(chat.name), 0.5, 0.8, 1, 1)
+	end
+end
+
+-- The agent ticked off a step of its plan: one line in the game chat and a
+-- quieter sound than a reply's. The reply itself still arrives as usual.
+function WoWAI.NotifyStep(chat, n, text, agent)
+	if db.settings.echo ~= "off" then
+		print("|cff7ec8ff[" .. ReplyAgentName(chat, agent) .. " · " .. Display(chat.name) .. "]|r |cff55ff55step " .. n .. " done:|r " .. Display(text))
+	end
+	pcall(PlaySound, SOUNDKIT and SOUNDKIT.IG_QUEST_LIST_COMPLETE or 878)
+	if not (ui.frame and ui.frame:IsShown() and db.activeChat == chat.id) and UIErrorsFrame then
+		UIErrorsFrame:AddMessage(Display(chat.name) .. ": " .. Display(text), 0.4, 0.9, 0.4, 1)
 	end
 end
 
@@ -2822,6 +2894,9 @@ local HELP = table.concat({
 	"/wow-ai agent [name]           which agent this chat talks to (no name = show; default = the bridge's). Right-clicking the chat and picking Agent does the same",
 	"/wow-ai reset                  next message in this chat starts a fresh agent session",
 	"/wow-ai context [on|off]       what the agent is told about your character and where you are (no argument = show it)",
+	"/wow-ai game [on|off]          this chat is a game chat (gets the context above, the addon primer and map/macro hints) or a development chat (none of it, fewer tokens). No argument = show",
+	"/wow-ai game default on|off    what chats that never picked use (default: off = development chats)",
+	"/wow-ai steps on|off           announce each step the agent ticks off its plan in the game chat (costs one reply slot per step)",
 	"/wow-ai map [...]              map layers the agent drew, the route navigator and herb/ore nodes (no argument = status and subcommands; /aimap is the same)",
 	"/wow-ai mode pixel             no-reload transport (default)",
 	"/wow-ai mode reload            fallback transport: a /reload per step",
@@ -2860,6 +2935,8 @@ local COMMAND_ARGS = {
 	context = { [""] = true, on = true, off = true }, ctx = { [""] = true, on = true, off = true },
 	mode = { [""] = true, pixel = true, reload = true },
 	signal = { [""] = true, on = true, off = true }, longchat = { [""] = true, on = true, off = true },
+	game = { [""] = true, on = true, off = true, ["default on"] = true, ["default off"] = true },
+	steps = { [""] = true, on = true, off = true },
 	auto = OnOffOrNumber,
 	echo = function(rest) return rest == "" or rest == "summary" or rest == "full" or rest == "short" or rest == "off" or tonumber(rest) ~= nil end,
 	bind = 1, agent = 1,
@@ -2966,6 +3043,29 @@ SlashCmdList["WOWAI"] = function(msg)
 			and "Game context is ON: the agent is told this with each message (it goes into its system prompt, so unrelated projects are unaffected by anything but a few lines). /wow-ai context off to stop.\n\n"
 			or "Game context is OFF: the agent is told nothing about the game. /wow-ai context on to send this:\n\n") .. ctx
 			.. "\n\nTip: click the input box, then shift-click an item, spell or quest to link it into your message; the agent gets its tooltip.")
+		WoWAI.Render()
+		WoWAI.Toggle(true)
+	elseif cmd == "game" then
+		rest = rest:lower()
+		if rest == "on" or rest == "off" then
+			c.game = rest == "on"
+		elseif rest == "default on" or rest == "default off" then
+			s.gameDefault = rest == "default on"
+		end
+		-- A game chat's next message must carry the context even if an earlier
+		-- one already did (the bridge keeps it, but say it again to be sure).
+		if IsGameChat(c) then run.contextSent = nil end
+		AddHistory(c, "system", (IsGameChat(c)
+			and "This is a game chat: the agent gets your character and location (if /wow-ai context is on), the addon/macro primer and the map/macro hints."
+			or "This is a development chat: the agent gets none of the game context, primer or hints, only your messages.")
+			.. (c.game == nil and " (following /wow-ai game default, which is " .. (s.gameDefault and "on" or "off") .. ")" or "")
+			.. "\n/wow-ai game on|off switches this chat, /wow-ai game default on|off the chats that never picked.")
+		WoWAI.Render()
+		WoWAI.Toggle(true)
+	elseif cmd == "steps" then
+		rest = rest:lower()
+		if rest == "on" or rest == "off" then s.steps = rest == "on" end
+		AddHistory(c, "system", "Step announcements are " .. (s.steps and "ON: each step the agent ticks off its plan is printed in the game chat as it happens (one reply slot each)." or "OFF: you hear from the agent when it replies.") .. " /wow-ai steps on|off")
 		WoWAI.Render()
 		WoWAI.Toggle(true)
 	elseif cmd == "mode" then
