@@ -1411,6 +1411,15 @@ function WoWAI.SendFromInput()
 	local text = ui.input:GetText()
 	ui.input:SetText("")
 	ui.input:ClearFocus() -- hand the keyboard back to the game after sending
+	-- "/wow-ai cd proj" typed here runs the command, as it would in the game chat box,
+	-- instead of going to the agent as a message. Other slash words ("/compact", a
+	-- skill) are the agent's own commands and still go to it.
+	local word, rest = Trim(text or ""):match("^(/%S+)%s*(.-)$")
+	if word and WoWAI.IsOwnSlash(word) then
+		SlashCmdList["WOWAI"](rest)
+		if rest == "" then WoWAI.Toggle(true) end -- a bare /wow-ai typed in the window keeps it open
+		return
+	end
 	WoWAI.Send(text)
 end
 
@@ -2967,6 +2976,16 @@ SLASH_WOWAI2 = "/wowai"
 SLASH_WOWAI3 = "/wow-claude" -- the project's old name, kept so old habits and macros still work
 SLASH_WOWAI4 = "/ai" -- the short form: /ai <text> sends, /ai agent codex and the rest work too
 SLASH_WOWAI5 = "/ask"
+function WoWAI.IsOwnSlash(word)
+	word = word:lower()
+	for i = 1, 9 do
+		local alias = _G["SLASH_WOWAI" .. i]
+		if alias == nil then break end
+		if alias:lower() == word then return true end
+	end
+	return false
+end
+
 SlashCmdList["WOWAI"] = function(msg)
 	msg = Trim(msg or "")
 	local cmd, rest = msg:match("^(%S+)%s*(.-)$")

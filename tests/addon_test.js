@@ -346,6 +346,22 @@ test('the Folder... menu item (right-click a chat) opens a prompt that sets the 
   assert.equal(vm.evaluate('WoWAIDB.chats[1].cwd'), '');
 });
 
+test('a /wow-ai command typed in the window input runs instead of going to the agent', () => {
+  const vm = newVM();
+  login(vm);
+  connect(vm);
+  vm.run('WoWAI.Toggle(true)');
+  vm.run('WoWAIInput:SetText("/wow-ai cd rm/rmbo-core"); WoWAI.SendFromInput()');
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].cwd'), 'rm/rmbo-core', 'the folder is set');
+  assert.equal(vm.evaluate('WoWAIDB.chats[1].pendingId'), null, 'nothing went to the agent');
+  vm.run('WoWAIInput:SetText("/AI new second"); WoWAI.SendFromInput()');
+  assert.equal(vm.evaluate('#WoWAIDB.chats'), '2', 'aliases and case work too');
+  // The agent's own slash commands still reach it.
+  vm.run('WoWAIInput:SetText("/compact"); WoWAI.SendFromInput()');
+  assert.ok(vm.num('WoWAIDB.chats[2].pendingId') >= 1);
+  assert.ok(stripRecords(vm).find(r => r.text === '/compact'));
+});
+
 test('a sent message is encoded on the strip with the chat folder, then a slot reply finishes it', () => {
   const vm = newVM();
   login(vm);
