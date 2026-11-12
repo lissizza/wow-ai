@@ -1008,3 +1008,40 @@ test('a client that plays any existing file waits for the bridge to delete ctl/e
   assert.match(diag, /sound channel: usable \(self-test: passed \(the bridge deletes files/);
   assert.match(diag, /heartbeat 2 beats/);
 });
+
+test('/r after an agent reply goes to the agent, and Enter (SendText) stays the game\'s own', () => {
+  const vm = newVM();
+  // A stand-in for ChatFrame1EditBox: Enter calls SendText, which parses "/r x" into
+  // ProcessChatType(msg, "REPLY", 1) and then says whatever text is still in the box.
+  vm.run(`
+    local eb = CreateFrame("EditBox", "ChatFrame1EditBox")
+    STUB.said = {}
+    function eb:UpdateHeader() end
+    function eb:ClearChat() self:SetText("") end
+    function eb:ProcessChatType(msg, index, send) STUB.whisperReply = msg; return true end
+    function eb:SendText()
+      local text = self:GetText() or ""
+      local rest = text:match("^/r%s+(.*)$")
+      if rest then self:ProcessChatType(rest, "REPLY", 1) end
+      text = self:GetText() or ""
+      if text ~= "" then table.insert(STUB.said, text) end
+    end
+    STUB.origSendText = eb.SendText
+  `);
+  login(vm);
+  connect(vm);
+  assert.equal(vm.evaluate('ChatFrame1EditBox.SendText == STUB.origSendText'), 'true', 'SendText is not replaced');
+  vm.run('WoWAI.Send("hi")');
+  const chatId = vm.evaluate('WoWAIDB.chats[1].id');
+  const id = vm.num('WoWAIDB.chats[1].pendingId');
+  nextSlot(vm, `{ now = time(), cwd = "", replies = { { chat = "${chatId}", id = ${id}, status = "done", text = "hello there" } } }`);
+  vm.run('STUB.now = STUB.now + 6; STUB.Tick()');
+  vm.run('ChatFrame1EditBox:SetText("/r thanks"); ChatFrame1EditBox:SendText()');
+  assert.equal(vm.evaluate('#STUB.said'), '0', 'nothing said aloud');
+  assert.equal(vm.evaluate('STUB.whisperReply'), null, 'no whisper reply');
+  assert.ok(vm.num('WoWAIDB.chats[1].pendingId') > id, 'sent to the agent');
+  assert.ok(stripRecords(vm).find(r => r.text === 'thanks'));
+  // Other lines are untouched.
+  vm.run('ChatFrame1EditBox:SetText("hello all"); ChatFrame1EditBox:SendText()');
+  assert.equal(vm.evaluate('STUB.said[1]'), 'hello all');
+});

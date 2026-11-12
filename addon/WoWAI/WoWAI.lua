@@ -2590,10 +2590,13 @@ end
 -- /r goes to the agent when it was the last one to message you, exactly like
 -- whisper reply, and the box shows a "To Codex [chat]:" header while you type.
 --
--- The chat type underneath is left alone (a custom type would leak into chat
--- settings); instead the box remembers an agent target, the header is repainted
--- over the game's own, and the send entry points are intercepted. Any other chat
--- type, Tab, Esc or a cleared box drops the target again.
+-- Only ProcessChatType is replaced, and the game calls it just for chat-type
+-- commands (/s, /p, /r, /1...). Enter itself (SendText) stays Blizzard's own:
+-- replacing it ran every line typed in chat as addon code, so /run's "allow
+-- scripts" dialog was blocked as an action of this addon. So the "/r " stays in
+-- the box while you type (only the header is repainted), and on Enter the game's
+-- own parsing hands "/r text" to ProcessChatType again, which sends it to the
+-- agent and empties the box, so nothing is said aloud.
 local AGENT_R, AGENT_G, AGENT_B = 0.49, 0.78, 1.0
 
 local function PaintAgentHeader(eb, chat)
@@ -2611,10 +2614,9 @@ local function PaintAgentHeader(eb, chat)
 	eb:SetTextColor(AGENT_R, AGENT_G, AGENT_B)
 end
 
-local function SendBoxToAgent(eb)
-	local chat = FindChat(eb.agentTarget)
-	local text = Trim(eb:GetText() or "")
-	eb.agentTarget = nil
+local function SendBoxToAgent(eb, chat, text)
+	text = Trim(text or "")
+	eb:SetText("")
 	eb:ClearChat()
 	if chat and db.activeChat ~= chat.id then WoWAI.SwitchChat(chat.id) end
 	if text ~= "" then
@@ -2633,47 +2635,17 @@ local function HookReplyCommand()
 
 			local origProcess = eb.ProcessChatType
 			eb.ProcessChatType = function(self, msg, index, send, ...)
-				if index ~= "REPLY" then
-					self.agentTarget = nil
-					return origProcess(self, msg, index, send, ...)
-				end
-				if not (db and run.lastMessenger == "agent") then
+				if index ~= "REPLY" or not (db and run.lastMessenger == "agent") then
 					return origProcess(self, msg, index, send, ...)
 				end
 				local chat = FindChat(run.lastReplyChat) or ActiveChat()
 				if send == 1 then
-					self:SetText(msg or "")
-					self.agentTarget = chat and chat.id
-					SendBoxToAgent(self)
-					return true
+					SendBoxToAgent(self, chat, msg)
+				elseif chat then
+					PaintAgentHeader(self, chat)
 				end
-				self.agentTarget = chat and chat.id
-				self:SetText(msg or "")
-				if chat then PaintAgentHeader(self, chat) end
 				return true
 			end
-
-			-- Enter arrives here; nothing below us ever sees an agent-targeted box.
-			for _, name in ipairs({ "SendMessage", "SendText" }) do
-				local orig = eb[name]
-				if orig then
-					eb[name] = function(self, ...)
-						if self.agentTarget then
-							SendBoxToAgent(self)
-							return
-						end
-						return orig(self, ...)
-					end
-				end
-			end
-
-			-- Anything that repaints the header normally (Tab, /s, sticky reset) ends agent mode.
-			hooksecurefunc(eb, "UpdateHeader", function(self)
-				if not self.agentPainting then self.agentTarget = nil end
-			end)
-			hooksecurefunc(eb, "ClearChat", function(self)
-				self.agentTarget = nil
-			end)
 		end
 	end
 end
