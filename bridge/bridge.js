@@ -223,11 +223,35 @@ function importSessions(job) {
   publishNow();
 }
 
-// Open a URL from a link button in the default browser. Only http(s): the URL
-// comes off the screen, so nothing else (file:, custom schemes) is ever launched.
+const isFile = p => { try { return fs.statSync(p).isFile(); } catch { return false; } };
+
+// Open a file link in the editor: `<editor> -g file:line` (Cursor and VS Code both
+// take it), trying config.json "editor" (default "cursor"), then "code". Only an
+// existing regular file, and only ever as an argument to the editor.
+function openInEditor(tag, link) {
+  if (!isFile(link.file)) { log(`${tag} refused to open ${link.file}: not an existing file`); return; }
+  const target = link.line ? `${link.file}:${link.line}` : link.file;
+  const editors = [...new Set([cfg.editor || 'cursor', 'code'])];
+  const attempt = i => {
+    if (i >= editors.length) { log(`${tag} could not open ${target}: no editor command found (set "editor" in config.json)`); return; }
+    let child;
+    try { child = spawn(editors[i], ['-g', target], { detached: true, stdio: 'ignore', windowsHide: true }); }
+    catch { attempt(i + 1); return; }
+    child.on('error', () => attempt(i + 1));
+    child.on('spawn', () => log(`${tag} opened ${target} in ${editors[i]}`));
+    child.unref();
+  };
+  attempt(0);
+}
+
+// Open a link button's target: a file link in the editor, an http(s) URL in the
+// default browser. The URL comes off the screen, so nothing else (other file:
+// forms, custom schemes) is ever launched.
 function openUrl(job) {
   const url = String(job.text || '').trim();
   const tag = `#${job.id}${job.session ? '@' + job.session : ''}`;
+  const fileLink = P.parseFileLink(url);
+  if (fileLink) { openInEditor(tag, fileLink); return; }
   if (!P.isOpenableUrl(url)) { log(`${tag} refused to open ${JSON.stringify(url.slice(0, 200))}: not an http(s) URL`); return; }
   const [file, args] = process.platform === 'darwin' ? ['open', [url]]
     : process.platform === 'win32' ? ['rundll32', ['url.dll,FileProtocolHandler', url]]
@@ -801,7 +825,7 @@ function finish(job, status, text, session, denied) {
   let macros = [], links = [], choices = [];
   if (status === 'done') {
     ({ text, choices } = P.extractChoices(text));
-    links = P.extractLinks(text, { jiraUrl: cfg.jiraUrl });
+    links = P.extractLinks(text, { jiraUrl: cfg.jiraUrl, cwd: resolveCwd(job.cwd), isFile });
     ({ text, summary } = P.splitSummary(text));
     // After the split: a macro block the agent put after "TL;DR:" must not end up
     // in the game-chat summary.

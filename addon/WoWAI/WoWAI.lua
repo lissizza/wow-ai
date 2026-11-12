@@ -1480,10 +1480,21 @@ end
 
 -- A link button: the bridge opens the URL in the browser on the player's computer
 -- (the game can't). Without the bridge, the copy box is the way out.
+-- A file link (file:///path#L12) names a file on the bridge's computer, opened in
+-- the editor there.
+local function IsFileLink(url)
+	return type(url) == "string" and url:match("^file:///") ~= nil
+end
+
 function WoWAI.OpenLink(url)
-	if type(url) ~= "string" or not url:match("^https?://") then return end
+	if type(url) ~= "string" or not (url:match("^https?://") or IsFileLink(url)) then return end
 	if db.settings.mode ~= "pixel" or not WoWAI.IsConnected() then
-		WoWAI.ShowCopy(url)
+		if IsFileLink(url) then
+			local file, line = url:match("^file://([^#]+)#L(%d+)$")
+			WoWAI.ShowCopy(file and (file .. ":" .. line) or url:sub(8))
+		else
+			WoWAI.ShowCopy(url)
+		end
 		print("|cff66ccff[WoW AI]|r the bridge isn't connected, so the link is in the copy box")
 		return
 	end
@@ -1493,7 +1504,11 @@ function WoWAI.OpenLink(url)
 	db.lastSeq = db.lastSeq + 1
 	run.outbound[db.lastSeq] = { chat = "", cwd = "", flags = "o", name = "", text = url, sentAt = GetTime(), open = true }
 	RefreshStrip()
-	print("|cff66ccff[WoW AI]|r opening " .. Display(url) .. " in your browser")
+	if IsFileLink(url) then
+		print("|cff66ccff[WoW AI]|r opening " .. Display((url:gsub("^file://", ""):gsub("#L", ":"))) .. " in your editor")
+	else
+		print("|cff66ccff[WoW AI]|r opening " .. Display(url) .. " in your browser")
+	end
 end
 
 -- /wow-ai import [folder filter | session id]: ask the bridge to turn saved Claude
@@ -1549,7 +1564,7 @@ function WoWAI.CleanLinks(list)
 	if type(list) ~= "table" then return nil end
 	local out = {}
 	for _, l in ipairs(list) do
-		if type(l) == "table" and type(l.url) == "string" and l.url:match("^https?://") then
+		if type(l) == "table" and type(l.url) == "string" and (l.url:match("^https?://") or IsFileLink(l.url)) then
 			out[#out + 1] = { label = type(l.label) == "string" and l.label ~= "" and l.label or l.url, url = l.url }
 		end
 	end

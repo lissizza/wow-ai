@@ -898,11 +898,11 @@ test('a reply\'s links open through the bridge and its choices send a quick repl
   const id = vm.num('WoWAIDB.chats[1].pendingId');
   vm.run('STUB.prints = {}');
   nextSlot(vm, `{ now = time(), cwd = "", replies = { { chat = "${chatId}", id = ${id}, status = "done", text = "Tests pass. Commit?", summary = "Commit?",
-    links = { { label = "app#42", url = "https://github.com/acme/app/pull/42" }, { label = "bad", url = "file:///etc/passwd" } },
+    links = { { label = "app#42", url = "https://github.com/acme/app/pull/42" }, { label = "bad", url = "javascript:alert(1)" }, { label = "models.py:394", url = "file:///w/proj/models.py#L394" } },
     choices = { "Yes, commit", "No" } } } }`);
   vm.run('STUB.now = STUB.now + 6; STUB.Tick()'); // first scheduled poll is 5 s after sending
   assert.equal(vm.evaluate('WoWAIDB.chats[1].pendingId'), null);
-  assert.equal(vm.evaluate('#WoWAIDB.chats[1].history[2].links'), '1', 'only http(s) links are kept');
+  assert.equal(vm.evaluate('#WoWAIDB.chats[1].history[2].links'), '2', 'only http(s) and file links are kept');
   const prints = vm.evaluate('table.concat(STUB.prints, "\\n")');
   assert.ok(prints.includes(`|Hwowai:url:${chatId}:${id}:1|h|cff7ec8ff[app#42]|r|h`), 'links line in the game chat');
   assert.ok(prints.includes(`|Hwowai:pick:${chatId}:${id}:2|h|cffffd100[No]|r|h`), 'answer line in the game chat');
@@ -916,6 +916,11 @@ test('a reply\'s links open through the bridge and its choices send a quick repl
   // The same link twice while unread by the bridge: one record.
   vm.run('WoWAI.OpenLink("https://github.com/acme/app/pull/42")');
   assert.equal(stripRecords(vm).filter(r => r.flags === 'o').length, 1);
+  // A file link goes the same way; the bridge opens it in the editor.
+  vm.run('STUB.prints = {}');
+  vm.run(`SetItemRef("wowai:url:${chatId}:${id}:2", "[models.py:394]", "LeftButton")`);
+  assert.ok(stripRecords(vm).find(r => r.flags === 'o' && r.text === 'file:///w/proj/models.py#L394'));
+  assert.match(vm.evaluate('table.concat(STUB.prints, "\\n")'), /\/w\/proj\/models.py:394 in your editor/);
 
   // Clicking an answer sends it as the next message; after that the old choices are stale.
   vm.run(`SetItemRef("wowai:pick:${chatId}:${id}:1", "[Yes, commit]", "LeftButton")`);

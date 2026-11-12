@@ -253,3 +253,31 @@ test('the system prompt tells every chat about link buttons and the choices bloc
     assert.match(sp, /opens it in the browser/);
   }
 });
+
+test('extractLinks turns paths of existing files into editor links, with the line', () => {
+  const files = new Set(['/w/proj/lookup/models.py', '/w/proj/README.md', '/abs/tool.js', '/home/u/notes.txt']);
+  const opts = { cwd: '/w/proj', home: '/home/u', isFile: p => files.has(p) };
+  const text = [
+    'Fixed `lookup/models.py:394` and lookup/models.py:12:5 too.',
+    'See README.md, /abs/tool.js and ~/notes.txt.',
+    'Not here: missing/file.py, version 1.2.3, e.g. foo.bar, https://x.io/a.js',
+  ].join('\n');
+  assert.deepEqual(P.extractLinks(text, opts), [
+    { label: 'x.io/a.js', url: 'https://x.io/a.js' },
+    { label: 'models.py:394', url: 'file:///w/proj/lookup/models.py#L394' },
+    { label: 'models.py:12', url: 'file:///w/proj/lookup/models.py#L12' },
+    { label: 'README.md', url: 'file:///w/proj/README.md' },
+    { label: 'tool.js', url: 'file:///abs/tool.js' },
+    { label: 'notes.txt', url: 'file:///home/u/notes.txt' },
+  ]);
+  // Without a way to check files, no file links at all.
+  assert.deepEqual(P.extractLinks('lookup/models.py:394'), []);
+});
+
+test('parseFileLink accepts only absolute file:// links with an optional line', () => {
+  assert.deepEqual(P.parseFileLink('file:///w/a b.py#L7'), { file: '/w/a b.py', line: 7 });
+  assert.deepEqual(P.parseFileLink('file:///w/a.py'), { file: '/w/a.py', line: 0 });
+  for (const bad of ['https://x.io', 'file://relative.py', 'file:///w/../etc/x.py', 'file:///w/a.py#Lx', 'file:///w/a\n.py', '']) {
+    assert.equal(P.parseFileLink(bad), null, bad);
+  }
+});

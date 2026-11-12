@@ -606,6 +606,18 @@ const CHOICES_RE = /```choices[^\n]*\n([\s\S]*?)```\n?/g;
 const URL_RE = /https?:\/\/[^\s<>"'`|\]\[)(]+(?:\([^\s<>"'`|()]*\)[^\s<>"'`|\]\[)(]*)*/g;
 const ISSUE_KEY_RE = /\b([A-Z][A-Z0-9]{1,15}-\d{1,7})\b/g;
 
+// A file path in a reply: absolute, ~/..., ./..., or relative to the chat's folder,
+// with an extension and an optional :line (and :column, dropped).
+const FILE_RE = /(?<![\w@.+\/~-])((?:~\/|\.{1,2}\/|\/)?(?:[\w@.+-]+\/)*[\w@+-][\w@.+-]*\.[A-Za-z][A-Za-z0-9]{0,7})(?::(\d{1,6})(?::\d{1,6})?)?(?![\w@\/-])/g;
+
+// { file, line } from a file link (file:///abs/path or file:///abs/path#L12), or
+// null. The link comes back off the screen, so only a plain absolute path passes.
+function parseFileLink(u) {
+  const m = typeof u === 'string' && u.length <= LINK_LIMITS.url && /^file:\/\/(\/[^\x00-\x1f\x7f#]*)(?:#L(\d{1,6}))?$/.exec(u);
+  if (!m || path.posix.normalize(m[1]) !== m[1] || m[1].endsWith('/')) return null;
+  return { file: m[1], line: m[2] ? Number(m[2]) : 0 };
+}
+
 const isOpenableUrl = u => typeof u === 'string' && u.length <= LINK_LIMITS.url && /^https?:\/\/[^\s\x00-\x1f\x7f]+$/i.test(u);
 
 // A short button label for a URL: "repo#12" for GitHub pull requests and
@@ -630,7 +642,9 @@ function decodeURIComponentSafe(s) {
 }
 
 // [{ label, url }]: every URL in the text, then issue keys that no URL already
-// covers (only with a tracker address, e.g. https://example.atlassian.net).
+// covers (only with a tracker address, e.g. https://example.atlassian.net), then
+// paths of files that exist (only with opts.isFile; relative ones against
+// opts.cwd) as file:///path#L<line> links the bridge opens in the editor.
 function extractLinks(text, opts = {}) {
   const src = String(text ?? '');
   const out = [], seen = new Set();
@@ -645,6 +659,26 @@ function extractLinks(text, opts = {}) {
     const covered = new Set(out.map(l => l.label));
     for (const m of src.replace(URL_RE, ' ').matchAll(ISSUE_KEY_RE)) {
       if (!covered.has(m[1])) { covered.add(m[1]); add(`${base}/browse/${m[1]}`, m[1]); }
+    }
+  }
+  if (typeof opts.isFile === 'function') {
+    const home = opts.home || os.homedir();
+    for (const m of src.replace(URL_RE, ' ').matchAll(FILE_RE)) {
+      if (out.length >= LINK_LIMITS.perReply) break;
+      const raw = m[1];
+      const abs = raw.startsWith('~/') ? path.posix.join(home, raw.slice(2))
+        : path.posix.isAbsolute(raw) ? path.posix.normalize(raw)
+        : opts.cwd ? path.posix.resolve(opts.cwd, raw) : null;
+      if (!abs) continue;
+      let ok = false;
+      try { ok = opts.isFile(abs); } catch {}
+      if (!ok) continue;
+      const line = m[2] ? Number(m[2]) : 0;
+      const url = 'file://' + abs + (line ? '#L' + line : '');
+      if (seen.has(url) || !parseFileLink(url)) continue;
+      seen.add(url);
+      const label = path.posix.basename(abs) + (line ? ':' + line : '');
+      out.push({ label: Array.from(label).length > LINK_LIMITS.label ? firstChars(label, LINK_LIMITS.label - 3) + '...' : label, url });
     }
   }
   return out;
@@ -672,5 +706,5 @@ module.exports = {
   luaStr, luaTable, SILENT_WAV,
   MAP_LIMITS, validateMapCommand, newMap, applyMapCommands, extractMapBlocks, parseMapFile, luaMap,
   MACRO_LIMITS, extractMacros, stripMacroBlocks, luaMacros,
-  LINK_LIMITS, CHOICE_LIMITS, extractLinks, extractChoices, linkLabel, isOpenableUrl,
+  LINK_LIMITS, CHOICE_LIMITS, extractLinks, extractChoices, linkLabel, isOpenableUrl, parseFileLink,
 };

@@ -73,6 +73,7 @@ These sizes are baked into the files `install-slots.js` creates, and the addon h
 | `actMax` | `60` | Heartbeat files per message (`act/NNN/01..60.wav`). One flips per agent action. |
 | `stepMax` | `30` | Step files per message (`step/NNN/01..30.wav`). One flips per plan item the agent finishes; the addon then reads the step's text from a slot and prints it in the game chat. |
 | `jiraUrl` | `""` | Your Jira address, e.g. `https://example.atlassian.net`. Issue keys like `ABC-123` in replies then become link buttons to `<jiraUrl>/browse/ABC-123`. URLs in replies are buttons either way. |
+| `editor` | `"cursor"` | Command that opens file links from replies, called as `<editor> -g <file>:<line>`; falls back to `code`. |
 | `presenceMax` | `2000` | Presence files (`presence/0001..2000.wav`). One flips per `presenceIntervalMs`. |
 | `sessionSync` | `true` | Watch the Claude session of every chat and bring messages typed into it outside the game (a terminal in the editor) into that chat. `false` turns it off. |
 | `syncPollMs` | `4000` | How often the bridge checks the chats' session files. A file is read once it has been quiet for 8 s (at most 60 s after it started growing). |
