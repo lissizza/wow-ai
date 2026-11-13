@@ -1,11 +1,14 @@
 #!/bin/bash
-# Start the bridge (in a Terminal window, unless it already runs), then open the
-# game launcher, so the bridge is up before the game starts and the launcher
+# Start the bridge (in a Terminal window, unless it already runs), then bring up
+# the Battle.net app, so the bridge is up before the game starts and Battle.net
 # still logs you in. `npm run app` wraps this in "WoW AI.app" for the Dock.
 #
-#   WOWAI_LAUNCHER  the app to open after the bridge (default: the World of
-#                   Warcraft launcher next to the client in config.json, else
-#                   /Applications/World of Warcraft/World of Warcraft Launcher.app)
+# Not "World of Warcraft Launcher.app" in the game folder: that is Blizzard's
+# installer stub (net.battle.bootstrapper). It downloads a new Battle.net agent
+# and shows the retail "Install World of Warcraft" window instead of the launcher.
+#
+#   WOWAI_LAUNCHER  the app to open after the bridge (default: Battle.net, by its
+#                   bundle id: started if needed, else brought to the front)
 set -u
 export PATH="$PATH:/opt/homebrew/bin:/usr/local/bin"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -28,14 +31,8 @@ OSA
   sleep 2
 fi
 
-LAUNCHER="${WOWAI_LAUNCHER:-}"
-if [ -z "$LAUNCHER" ]; then
-  ADDONS="$(node -e 'try{console.log(require(process.argv[1]).addonDir||"")}catch{}' "$REPO/bridge/config.json")"
-  if [ -n "$ADDONS" ]; then
-    # .../World of Warcraft/_forever_/Interface/AddOns -> .../World of Warcraft
-    CAND="$(dirname "$(dirname "$(dirname "$ADDONS")")")/World of Warcraft Launcher.app"
-    [ -d "$CAND" ] && LAUNCHER="$CAND"
-  fi
+if [ -n "${WOWAI_LAUNCHER:-}" ]; then
+  open "$WOWAI_LAUNCHER"
+else
+  open -b net.battle.app
 fi
-LAUNCHER="${LAUNCHER:-/Applications/World of Warcraft/World of Warcraft Launcher.app}"
-open "$LAUNCHER"
